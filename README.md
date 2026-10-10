@@ -58,6 +58,7 @@ Settings come from three places, highest priority first:
 | `VISION_TIMEOUT` | `300` | Seconds per request (model loading included) |
 | `VISION_MAX_CONCURRENCY` | `1` | Parallel requests; match `--parallel` |
 | `VISION_CONFIDENCE_THRESHOLD` | `0.80` | Flag lines below this |
+| `VISION_DISABLE_THINKING` | `true` | Ask thinking models to answer directly |
 | `VISION_IMAGE_MAX_SIDE` | `1600` | Whole photos are shrunk to this before sending |
 | `CARD_DETECTION_DEFAULT` | `true` | Pre-pass checkbox default |
 | `ALLOW_PASSWORD_LOGIN` | `true` | Username/password login |
