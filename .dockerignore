@@ -1,0 +1,9 @@
+.git
+.venv
+**/__pycache__
+**/.pytest_cache
+**/node_modules
+backend/deck_keeper/static
+backend/data
+data
+docs

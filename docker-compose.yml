@@ -1,0 +1,44 @@
+# Example: Deck Keeper plus llama-swap on one machine with an NVIDIA GPU.
+# Already running llama-swap elsewhere? Delete that service and point
+# VISION_BASE_URL at it (or set it in Settings → Vision model).
+services:
+  deck-keeper:
+    image: ghcr.io/adman234/mtg-deck-keeper:latest
+    container_name: deck-keeper
+    restart: unless-stopped
+    ports:
+      - "9925:9925"
+    volumes:
+      - ./data:/app/data
+    environment:
+      PUID: 1000
+      PGID: 1000
+      # Everything below is optional; leave it out to configure in the web UI.
+      VISION_BASE_URL: http://llama-swap:8080/v1
+      VISION_MODEL: daily
+      VISION_MAX_CONCURRENCY: 3
+      # BASE_URL: https://decks.example.com
+      # OIDC_AUTH_ENABLED: "true"
+      # OIDC_CONFIGURATION_URL: https://auth.example.com/application/o/deck-keeper/.well-known/openid-configuration
+      # OIDC_CLIENT_ID: deck-keeper
+      # OIDC_CLIENT_SECRET: change-me
+      # OIDC_PROVIDER_NAME: Authentik
+      # OIDC_USER_GROUP: deck-keeper-users
+      # OIDC_ADMIN_GROUP: deck-keeper-admins
+
+  llama-swap:
+    image: ghcr.io/mostlygeek/llama-swap:cuda
+    container_name: llama-swap
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./llama-swap.yaml:/app/config.yaml:ro
+      - /path/to/models:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
