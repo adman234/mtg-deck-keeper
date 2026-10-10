@@ -50,6 +50,9 @@ SPECS: list[Spec] = [
          "Lines below this confidence are flagged for review (0–1)."),
     Spec("vision.prepass_default", "CARD_DETECTION_DEFAULT", bool, True, "Card detection pre-pass on by default",
          "vision", "Crop individual cards with OpenCV before asking the model. Users can untick it per scan."),
+    Spec("vision.disable_thinking", "VISION_DISABLE_THINKING", bool, True, "Turn off model thinking", "vision",
+         "Asks thinking models (Qwen3 and similar) to answer directly. Faster, and stops empty replies "
+         "when reasoning uses up the reply budget."),
     Spec("vision.image_max_side", "VISION_IMAGE_MAX_SIDE", int, 1600, "Max image size sent (px)", "vision"),
     # Login / OIDC (names match Mealie)
     Spec("auth.password_login", "ALLOW_PASSWORD_LOGIN", bool, True, "Allow username/password login", "auth",

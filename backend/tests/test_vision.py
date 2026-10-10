@@ -53,3 +53,60 @@ def test_falls_back_when_structured_output_unsupported():
 def test_missing_model_is_a_clear_error():
     with pytest.raises(VisionError, match="No vision model"):
         asyncio.run(vision.read_cards(VisionConfig(base_url="http://x/v1", model=""), b"", True))
+
+
+def _run(handler, **cfg):
+    vision.transport = httpx.MockTransport(handler)
+    try:
+        return asyncio.run(vision.read_cards(VisionConfig(base_url="http://x/v1", model="daily", **cfg),
+                                             b"jpeg", single_card=True))
+    finally:
+        vision.transport = None
+
+
+def _reply(message: dict, finish_reason="stop") -> httpx.Response:
+    return httpx.Response(200, json={"choices": [{"message": message, "finish_reason": finish_reason}]})
+
+
+def test_asks_server_to_turn_off_thinking_by_default():
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return _reply({"content": '{"cards":[{"name":"Island","count":1,"confidence":1}]}'})
+
+    _run(handler)
+    _run(handler, disable_thinking=False)
+    assert seen[0]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "chat_template_kwargs" not in seen[1]
+    assert seen[0]["max_tokens"] >= 1024
+
+
+def test_strict_server_rejecting_template_kwargs_keeps_structured_output():
+    seen = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        seen.append(sorted(k for k in body if k in vision.OPTIONAL_FIELDS))
+        if "chat_template_kwargs" in body:
+            return httpx.Response(400, text="Unrecognized request argument supplied: chat_template_kwargs")
+        return _reply({"content": '{"cards":[{"name":"Island","count":1,"confidence":1}]}'})
+
+    assert _run(handler)[0].name == "Island"
+    assert seen == [["chat_template_kwargs", "response_format"], ["response_format"]]
+
+
+def test_answer_found_in_reasoning_when_content_empty():
+    reply = _reply({"content": "", "reasoning_content": 'Okay. {"cards":[{"name":"Shock","count":1,"confidence":0.9}]}'})
+    assert _run(lambda r: reply)[0].name == "Shock"
+
+
+def test_thinking_ran_out_of_tokens_gives_actionable_error():
+    reply = _reply({"content": "", "reasoning_content": "Let me look at the title line carefully..."}, "length")
+    with pytest.raises(VisionError, match="reasoning-budget 0"):
+        _run(lambda r: reply)
+
+
+def test_plain_empty_reply_mentions_mmproj():
+    with pytest.raises(VisionError, match="mmproj"):
+        _run(lambda r: _reply({"content": ""}))

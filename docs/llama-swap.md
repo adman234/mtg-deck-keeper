@@ -23,6 +23,7 @@ models:
       --cache-reuse 256
       --cache-ram 4096
       --kv-unified
+      --reasoning-budget 0     # only if the model "thinks"; see below
 ```
 
 Then in Deck Keeper (Settings → Vision model, or env vars):
@@ -37,6 +38,13 @@ Then in Deck Keeper (Settings → Vision model, or env vars):
 Use **Test connection & list models** to confirm Deck Keeper can see `daily`.
 
 ## Notes on the flags
+
+- **Thinking models** (Qwen3 and similar fine-tunes) reason before answering. If the reasoning
+  uses up the reply budget, the answer comes back empty and the scan fails with
+  "Model reply had no JSON". Deck Keeper asks the server to skip thinking on every request
+  ("Turn off model thinking" in Settings, on by default). If your model's chat template ignores
+  that, add `--reasoning-budget 0` to its llama-server command. Card reading doesn't benefit
+  from reasoning, and it makes each request much slower.
 
 - `--mmproj` is what makes the model see images. Without it the server rejects image input.
 - `--image-min-tokens 1024` gives each image more tokens, which helps with small title text.

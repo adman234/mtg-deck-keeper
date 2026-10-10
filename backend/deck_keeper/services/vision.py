@@ -66,10 +66,12 @@ class VisionConfig:
     model: str
     api_key: str = ""
     timeout: float = 300
+    disable_thinking: bool = True
 
     @classmethod
     def from_settings(cls, s: dict) -> "VisionConfig":
-        return cls(base_url=s["base_url"], model=s["model"], api_key=s["api_key"], timeout=s["timeout"])
+        return cls(base_url=s["base_url"], model=s["model"], api_key=s["api_key"], timeout=s["timeout"],
+                   disable_thinking=s["disable_thinking"])
 
 
 @dataclass
@@ -137,6 +139,20 @@ def parse_cards(text: str) -> list[ReadCard]:
     return out
 
 
+# Request fields some servers don't know. On a 400 that names one, it is dropped and the
+# request retried, so OpenAI-strict servers still work.
+OPTIONAL_FIELDS = ("chat_template_kwargs", "response_format")
+
+
+def _message_text(message: dict) -> tuple[str, str]:
+    """Return (answer, reasoning) text from an OpenAI-style message."""
+    content = message.get("content") or ""
+    if isinstance(content, list):  # some servers return content parts
+        content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+    reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+    return content, reasoning if isinstance(reasoning, str) else ""
+
+
 async def read_cards(cfg: VisionConfig, jpeg: bytes, single_card: bool) -> list[ReadCard]:
     if not cfg.model:
         raise VisionError("No vision model is configured. Choose one in Settings → Vision model.")
@@ -144,7 +160,8 @@ async def read_cards(cfg: VisionConfig, jpeg: bytes, single_card: bool) -> list[
     body = {
         "model": cfg.model,
         "temperature": 0,
-        "max_tokens": 256 if single_card else 2048,
+        # Generous so a model that thinks anyway still has room left for the answer.
+        "max_tokens": 1024 if single_card else 4096,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": [
@@ -154,12 +171,17 @@ async def read_cards(cfg: VisionConfig, jpeg: bytes, single_card: bool) -> list[
         ],
         "response_format": {"type": "json_schema", "json_schema": {"name": "cards", "schema": CARD_SCHEMA}},
     }
+    if cfg.disable_thinking:
+        # Honoured by llama-server / llama-swap and vLLM chat templates (Qwen3, etc.).
+        body["chat_template_kwargs"] = {"enable_thinking": False}
     async with _client(cfg) as client:
         try:
             r = await client.post("/chat/completions", json=body)
-            if r.status_code in (400, 422) and "response_format" in r.text:
-                # Server doesn't support structured output; rely on the prompt instead.
-                body.pop("response_format")
+            while r.status_code in (400, 422):
+                field = next((f for f in OPTIONAL_FIELDS if f in body and f in r.text), None)
+                if field is None:
+                    break
+                body.pop(field)
                 r = await client.post("/chat/completions", json=body)
             r.raise_for_status()
         except httpx.TimeoutException as e:
@@ -169,9 +191,26 @@ async def read_cards(cfg: VisionConfig, jpeg: bytes, single_card: bool) -> list[
         except httpx.HTTPError as e:
             raise VisionError(f"Could not reach the vision server at {cfg.base_url}: {e}") from e
     try:
-        content = r.json()["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, ValueError) as e:
+        choice = r.json()["choices"][0]
+        content, reasoning = _message_text(choice["message"])
+    except (KeyError, IndexError, TypeError, ValueError) as e:
         raise VisionError(f"Unexpected reply from vision server: {r.text[:300]}") from e
-    if isinstance(content, list):  # some servers return content parts
-        content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
-    return parse_cards(content or "")
+    if content.strip():
+        return parse_cards(content)
+    if reasoning.strip():
+        # Thinking models sometimes put the whole answer in the reasoning text.
+        try:
+            return parse_cards(reasoning)
+        except VisionError:
+            pass
+    log.warning("Empty reply from %s (finish_reason=%s): %s", cfg.model, choice.get("finish_reason"), r.text[:500])
+    if reasoning or choice.get("finish_reason") == "length":
+        raise VisionError(
+            "The model used its whole reply on reasoning and returned no answer. It looks like a "
+            "thinking model: add --reasoning-budget 0 to its llama-server command in llama-swap, "
+            "or keep 'Turn off model thinking' enabled in Settings → Vision model."
+        )
+    raise VisionError(
+        "The model returned an empty reply. Check that it can see images (llama-server needs "
+        "--mmproj) and look at the llama-swap log for errors."
+    )
