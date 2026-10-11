@@ -113,3 +113,23 @@ def test_empty_card_list_and_no_scryfall_gives_clear_error(admin):
     asyncio.run(scanner.process_job(job_id))
     scan = admin.get(f"/api/scans/{job_id}").json()
     assert scan["status"] == "failed" and "Scryfall could not be reached" in scan["error"]
+
+
+def test_foreign_card_identified_in_full_scan(admin):
+    admin.put("/api/admin/settings", json={"values": {"vision.model": "daily"}})
+    vision.transport = httpx.MockTransport(lambda r: chat_reply([
+        {"name": "稲妻", "count": 4, "set": "STA", "collector_number": "042/063", "confidence": 0.9}]))
+
+    def scry(request):
+        if request.url.path == "/cards/sta/42":
+            return httpx.Response(200, json={"name": "Lightning Bolt", "printed_name": "稲妻", "lang": "ja"})
+        return httpx.Response(404, json={})
+
+    scryfall.transport = httpx.MockTransport(scry)
+    job_id = admin.post("/api/scans", data={"prepass": "false"},
+                        files=[("files", ("a.jpg", _jpeg(), "image/jpeg"))]).json()["id"]
+    asyncio.run(scanner.process_job(job_id))
+    scan = admin.get(f"/api/scans/{job_id}").json()
+    line = scan["lines"][0]
+    assert (line["card"]["name"], line["qty"], line["needs_review"]) == ("Lightning Bolt", 4, False)
+    assert line["sources"][0]["match_method"] == "printing" and line["raw_name"] == "稲妻"

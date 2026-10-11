@@ -127,6 +127,20 @@ class Detection(Base):
     model_confidence: Mapped[float] = mapped_column(Float, default=0.0)
     card_id: Mapped[int | None] = mapped_column(ForeignKey("cards.id"))
     match_score: Mapped[float] = mapped_column(Float, default=0.0)
+    # How the card was identified: name | printing | foreign:<lang> | choice
+    match_method: Mapped[str | None] = mapped_column(String(20))
+
+
+class Lookup(Base):
+    """Cached Scryfall answers for collector-number and foreign-name lookups (None = not found)."""
+
+    __tablename__ = "lookups"
+    __table_args__ = (UniqueConstraint("kind", "key"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(20))  # printing | foreign
+    key: Mapped[str] = mapped_column(String(255))
+    result: Mapped[dict | None] = mapped_column(JSON)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ScanLine(Base):

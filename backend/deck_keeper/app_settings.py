@@ -53,6 +53,15 @@ SPECS: list[Spec] = [
     Spec("vision.disable_thinking", "VISION_DISABLE_THINKING", bool, True, "Turn off model thinking", "vision",
          "Asks thinking models (Qwen3 and similar) to answer directly. Faster, and stops empty replies "
          "when reasoning uses up the reply budget."),
+    Spec("vision.collector_lookup", "MATCH_COLLECTOR_NUMBER", bool, True, "Use set code and collector number",
+         "vision", "When the name doesn't match well, look up the exact printing on Scryfall from the code "
+         "printed at the bottom-left. Works for any language and frame."),
+    Spec("vision.foreign_lookup", "MATCH_FOREIGN_NAMES", bool, True, "Look up foreign-language names", "vision",
+         "Search Scryfall for names that aren't English (German, Japanese, …) and for alternate "
+         "names such as Godzilla cards. Answers are cached."),
+    Spec("vision.candidate_reask", "MATCH_REASK", bool, True, "Ask again with likely candidates", "vision",
+         "For hard-to-read cut-out cards, show the model the card again with the closest names and "
+         "let it pick. One extra model call per unclear card."),
     Spec("vision.image_max_side", "VISION_IMAGE_MAX_SIDE", int, 1600, "Max image size sent (px)", "vision"),
     # Login / OIDC (names match Mealie)
     Spec("auth.password_login", "ALLOW_PASSWORD_LOGIN", bool, True, "Allow username/password login", "auth",

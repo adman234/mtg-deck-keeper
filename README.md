@@ -59,6 +59,9 @@ Settings come from three places, highest priority first:
 | `VISION_MAX_CONCURRENCY` | `1` | Parallel requests; match `--parallel` |
 | `VISION_CONFIDENCE_THRESHOLD` | `0.80` | Flag lines below this |
 | `VISION_DISABLE_THINKING` | `true` | Ask thinking models to answer directly |
+| `MATCH_COLLECTOR_NUMBER` | `true` | Identify cards by set code + collector number |
+| `MATCH_FOREIGN_NAMES` | `true` | Search Scryfall for foreign-language and alternate names |
+| `MATCH_REASK` | `true` | Re-ask the model with candidates for unclear cut-out cards |
 | `VISION_IMAGE_MAX_SIDE` | `1600` | Whole photos are shrunk to this before sending |
 | `CARD_DETECTION_DEFAULT` | `true` | Pre-pass checkbox default |
 | `ALLOW_PASSWORD_LOGIN` | `true` | Username/password login |
@@ -90,7 +93,9 @@ exact value to copy into your provider.
    sends it to the model on its own. Each photo is also sent whole.
 3. The model returns JSON (name, count, set, collector number, confidence) using structured output.
 4. Names are fuzzy-matched against the local Scryfall list, including each face of
-   double-faced cards.
+   double-faced cards. Cards that don't match well are looked up by set code and collector
+   number, then by foreign or alternate name, and unclear cut-out cards are shown to the model
+   again with candidates. See [docs/foreign-and-showcase.md](docs/foreign-and-showcase.md).
 5. Within one photo, a card's quantity is the higher of the crop count and the whole-photo count.
    Across photos, quantities are added.
 6. A line is flagged when its confidence (model × name match) is under the threshold, when nothing

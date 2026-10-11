@@ -52,6 +52,7 @@ def line_out(line: ScanLine, dets: dict[int, Detection], job_id: int) -> dict:
         sources.append({
             "detection_id": d.id, "image_id": d.image_id, "source": d.source, "raw_name": d.raw_name,
             "qty": d.qty, "model_confidence": d.model_confidence, "match_score": d.match_score,
+            "match_method": d.match_method,
             "set": d.raw_set, "collector_number": d.raw_number,
             "crop_url": f"/api/scans/{job_id}/crops/{d.id}" if d.crop_path else None,
         })
