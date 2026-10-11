@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useRouter } from "vue-router";
-import { api, BOARDS, FLAG_TEXT, FORMATS, fmtDate, pct } from "../api";
+import { api, BOARDS, FLAG_TEXT, FORMATS, QTY_FLAGS, fmtDate, pct } from "../api";
 import CardSearch from "../components/CardSearch.vue";
 
 const props = defineProps({ id: String });
@@ -87,6 +87,8 @@ const totals = computed(() => {
   return t;
 });
 const progress = computed(() => (scan.value?.total_images ? scan.value.processed_images / scan.value.total_images : 0));
+const checkQty = (l) => !l.accepted && l.flags.some((f) => QTY_FLAGS.includes(f));
+const pillFlags = (l) => l.flags.filter((f) => !QTY_FLAGS.includes(f));
 const confClass = (l) => (!l.card ? "bad" : l.confidence >= scan.value.threshold ? "ok" : "warn");
 const crops = (l) => l.sources.filter((s) => s.crop_url);
 const sourceText = (l) => {
@@ -157,10 +159,13 @@ const sourceText = (l) => {
           </button>
           <div v-else class="thumb none" aria-hidden="true"></div>
 
-          <div class="qty">
-            <button class="btn small" @click="setQty(l, l.qty - 1)" :disabled="l.qty <= 1" aria-label="One fewer">−</button>
-            <input type="number" min="1" max="999" :value="l.qty" @change="setQty(l, $event.target.value)" :aria-label="`Quantity of ${l.card?.name || l.raw_name}`" />
-            <button class="btn small" @click="setQty(l, l.qty + 1)" aria-label="One more">+</button>
+          <div class="qty" :class="{ check: checkQty(l) }">
+            <div class="qty-controls">
+              <button class="btn small" @click="setQty(l, l.qty - 1)" :disabled="l.qty <= 1" aria-label="One fewer">−</button>
+              <input type="number" min="1" max="999" :value="l.qty" @change="setQty(l, $event.target.value)" :aria-label="`Quantity of ${l.card?.name || l.raw_name}`" />
+              <button class="btn small" @click="setQty(l, l.qty + 1)" aria-label="One more">+</button>
+            </div>
+            <span v-if="checkQty(l)" class="qty-note">Check the quantity</span>
           </div>
 
           <div class="name">
@@ -175,8 +180,8 @@ const sourceText = (l) => {
                 <span v-if="l.sources.length">{{ sourceText(l) }}</span>
                 <span v-else>Added by you</span>
               </p>
-              <div v-if="l.flags.length && !l.accepted" class="row" style="gap:6px">
-                <span v-for="f in l.flags" :key="f" class="pill" :class="f === 'unmatched' ? 'bad' : 'warn'">{{ FLAG_TEXT[f] || f }}</span>
+              <div v-if="pillFlags(l).length && !l.accepted" class="row" style="gap:6px">
+                <span v-for="f in pillFlags(l)" :key="f" class="pill" :class="f === 'unmatched' ? 'bad' : 'warn'">{{ FLAG_TEXT[f] || f }}</span>
               </div>
               <div v-if="l.needs_review && l.suggestions.length" class="row suggest">
                 <span class="sub small">Did you mean</span>
@@ -257,8 +262,11 @@ const sourceText = (l) => {
 .thumb.none { cursor: default; border-style: dashed; opacity: 0.5; }
 .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .more { position: absolute; right: 2px; bottom: 2px; background: var(--ink); color: var(--bg); font-size: 0.68rem; padding: 0 4px; border-radius: 3px; }
-.qty { display: flex; gap: 4px; align-items: center; }
+.qty { display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }
+.qty-controls { display: flex; gap: 4px; align-items: center; }
 .qty input { width: 52px; text-align: center; padding: 5px 4px; }
+.qty.check input { border: 2px solid var(--warn); background: var(--warn-soft); font-weight: 700; }
+.qty-note { font-size: 0.75rem; font-weight: 600; color: var(--warn); }
 .name { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .unknown { color: var(--bad); }
 .suggest { gap: 6px; }
