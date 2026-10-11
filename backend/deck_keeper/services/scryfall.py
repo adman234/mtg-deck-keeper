@@ -214,6 +214,19 @@ def loose(text: str) -> str:
     return "".join(ch for ch in text if unicodedata.category(ch)[0] in "LN")
 
 
+def _foreign_queries(raw_name: str) -> list[str]:
+    """Exact phrase first, then looser searches that survive a misread letter or accent."""
+    text = re.sub(r'["()]', " ", raw_name).strip()
+    words = [w for w in re.split(r"\s+", text) if w]
+    queries = [f'"{text}"']
+    if len(words) > 1:
+        queries.append(" ".join(words))  # every word, any order
+        # One distinctive word at a time, so a single misread word can't sink the search.
+        distinct = list(dict.fromkeys(w for w in words if len(w) >= 4))
+        queries += sorted(distinct, key=len, reverse=True)[:2]  # stable: ties keep word order
+    return queries
+
+
 async def lookup_foreign(db: Session, raw_name: str) -> dict | None:
     """Find a card by its printed name in any language (or a flavor name). Never raises."""
     key = loose(raw_name)
@@ -222,26 +235,26 @@ async def lookup_foreign(db: Session, raw_name: str) -> dict | None:
     hit, result = _cached(db, "foreign", key)
     if hit:
         return result
-    query = raw_name.replace('"', "").strip()
-    try:
-        r = await _get("/cards/search", {"q": f'"{query}" lang:any', "include_multilingual": "true",
-                                         "unique": "prints"})
-    except httpx.HTTPError as e:
-        log.info("Foreign lookup %r failed: %s", raw_name, e)
-        return None
-    if r.status_code == 404:
-        _store(db, "foreign", key, None)
-        return None
-    if r.status_code != 200:
-        return None
-    best, best_score = None, 0.0
-    for card in r.json().get("data", [])[:60]:
-        for name in _names(card):
-            score = fuzz.ratio(key, loose(name))
-            if score > best_score:
-                best, best_score = card, score
     result = None
-    if best is not None and best_score >= 80:
-        result = {**_summary(best), "score": round(best_score, 1)}
+    for query in _foreign_queries(raw_name):
+        try:
+            r = await _get("/cards/search", {"q": f"{query} lang:any", "include_multilingual": "true",
+                                             "unique": "prints"})
+        except httpx.HTTPError as e:
+            log.info("Foreign lookup %r failed: %s", raw_name, e)
+            return None  # not cached: try again next scan
+        if r.status_code == 404:
+            continue
+        if r.status_code != 200:
+            return None
+        best, best_score = None, 0.0
+        for card in r.json().get("data", [])[:100]:
+            for name in _names(card):
+                score = fuzz.ratio(key, loose(name))
+                if score > best_score:
+                    best, best_score = card, score
+        if best is not None and best_score >= 80:
+            result = {**_summary(best), "score": round(best_score, 1)}
+            break
     _store(db, "foreign", key, result)
     return result

@@ -13,6 +13,7 @@ import numpy as np
 CARD_RATIO = 63 / 88  # width / height, about 0.716
 RATIO_TOLERANCE = 0.12
 OUT_W, OUT_H = 488, 680
+SMALL_FRACTION = 0.6  # an art box is ~45% of its card's area
 
 
 @dataclass
@@ -81,6 +82,13 @@ def find_cards(img: np.ndarray, max_cards: int = 100) -> list[FoundCard]:
         kept.append(q)
         if len(kept) >= max_cards:
             break
+
+    # Cards in one photo are about the same size. A quad far smaller than the typical one is
+    # almost always a card's art box (its proportions are close to a card's) whose outer
+    # border wasn't found, and a crop of just the art has no title to read.
+    if len(kept) >= 3:
+        typical = float(np.median([q[0] for q in kept]))
+        kept = [q for q in kept if q[0] >= typical * SMALL_FRACTION]
 
     # Reading order: top-to-bottom rows, then left-to-right.
     kept.sort(key=lambda q: (round(q[2][1] / max(1, q[2][3] * 0.5)), q[2][0]))

@@ -73,8 +73,16 @@ class _Read:
     card: vision.ReadCard
 
 
+@dataclass
+class _ImageResult:
+    crops: int
+    reads: list[_Read]
+    photo_cards: int | None  # None when the whole-photo read failed
+    photo_error: str | None
+
+
 async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionConfig,
-                         sem: asyncio.Semaphore, max_side: int) -> tuple[int, list[_Read]]:
+                         sem: asyncio.Semaphore, max_side: int) -> _ImageResult:
     img = await asyncio.to_thread(cv2.imread, img_row.path)
     if img is None:
         raise vision.VisionError(f"Could not open {img_row.filename}")
@@ -100,15 +108,34 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
 
     reads: list[_Read] = []
     errors: list[Exception] = []
+    photo_cards, photo_error = None, None
     for source, crop_path, bbox, task in tasks:
         try:
-            for rc in await task:
-                reads.append(_Read(source, crop_path, bbox, rc))
+            cards = await task
         except vision.VisionError as e:
             errors.append(e)
+            if source == "photo":
+                photo_error = str(e)
+                log.warning("Whole-photo read of %s failed: %s", img_row.filename, e)
+            continue
+        if source == "photo":
+            photo_cards = len(cards)
+        reads.extend(_Read(source, crop_path, bbox, rc) for rc in cards)
     if errors and len(errors) == len(tasks):
         raise errors[0]
-    return len(found), reads
+    return _ImageResult(len(found), reads, photo_cards, photo_error)
+
+
+WEAK_CROP_SCORE = 85.0
+WEAK_CROP_CONFIDENCE = 0.6
+
+
+def _unconfirmed(det: Detection, photo_card_ids: set[int]) -> bool:
+    """A shaky crop read for a card the whole-photo read didn't see is usually a bad crop
+    (e.g. only the artwork was cut out) rather than a real extra card."""
+    if det.source != "crop" or det.card_id in photo_card_ids:
+        return False
+    return det.card_id is None or det.match_score < WEAK_CROP_SCORE or det.model_confidence < WEAK_CROP_CONFIDENCE
 
 
 def _flags_for(line: dict, threshold: float) -> list[str]:
@@ -139,6 +166,8 @@ def build_lines(db: Session, job: ScanJob, threshold: float) -> list[ScanLine]:
         photo_counts: dict[object, int] = defaultdict(int)
         per_key: dict[object, list[Detection]] = defaultdict(list)
         for d in img.detections:
+            if d.match_method == "unconfirmed":
+                continue
             key = d.card_id if d.card_id is not None else ("raw", matching.normalize(d.raw_name))
             (crop_counts if d.source == "crop" else photo_counts)[key] += d.qty
             per_key[key].append(d)
@@ -195,6 +224,7 @@ async def process_job(job_id: int) -> None:
         for img in job.images:
             img.detections.clear()
             img.crops_found = 0
+            img.photo_cards = img.photo_error = None
         job.lines.clear()
         db.commit()
         sem = asyncio.Semaphore(max(1, vs["max_concurrency"]))
@@ -220,8 +250,9 @@ async def process_job(job_id: int) -> None:
             for n, img in enumerate(job.images, start=1):
                 job.step = f"Reading photo {n} of {len(job.images)}"
                 db.commit()
-                crops, reads = await _process_image(img, job.prepass, cfg, sem, vs["image_max_side"])
-                img.crops_found = crops
+                result = await _process_image(img, job.prepass, cfg, sem, vs["image_max_side"])
+                img.crops_found, img.photo_cards, img.photo_error = result.crops, result.photo_cards, result.photo_error
+                reads = result.reads
                 job.step = f"Identifying cards in photo {n} of {len(job.images)}"
                 db.commit()
                 for r in reads:
@@ -234,12 +265,24 @@ async def process_job(job_id: int) -> None:
                         model_confidence=res.confidence if res.confidence is not None else r.card.confidence,
                         card_id=res.card_id, match_score=res.score, match_method=res.method,
                     ))
+                if result.photo_error is None:
+                    seen = {d.card_id for d in img.detections if d.source == "photo" and d.card_id}
+                    for d in img.detections:
+                        if _unconfirmed(d, seen):
+                            d.match_method = "unconfirmed"
                 job.processed_images = n
                 db.commit()
             job.step = "Building decklist"
             db.flush()
-            for line in build_lines(db, job, vs["confidence_threshold"]):
+            lines = build_lines(db, job, vs["confidence_threshold"])
+            for line in lines:
                 db.add(line)
+            db.flush()
+            # Card pictures for the review screen (lines without a cut-out show these instead).
+            job.step = "Fetching card images"
+            db.commit()
+            card_ids = {ln.card_id for ln in lines if ln.card_id}
+            await scryfall.fetch_details(db, list(db.scalars(select(Card).where(Card.id.in_(card_ids)))))
             job.status = "review"
             job.step = ""
         except Exception as e:

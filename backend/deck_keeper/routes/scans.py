@@ -70,7 +70,9 @@ def job_detail(db: Session, job: ScanJob) -> dict:
         **job_summary(job),
         "threshold": app_settings.get(db, "vision.confidence_threshold"),
         "images": [{"id": i.id, "filename": i.filename, "width": i.width, "height": i.height,
-                    "crops_found": i.crops_found, "url": f"/api/scans/{job.id}/photos/{i.id}"} for i in job.images],
+                    "crops_found": i.crops_found, "photo_cards": i.photo_cards, "photo_error": i.photo_error,
+                    "unconfirmed_crops": sum(1 for d in i.detections if d.match_method == "unconfirmed"),
+                    "url": f"/api/scans/{job.id}/photos/{i.id}"} for i in job.images],
         "lines": [line_out(ln, dets, job.id) for ln in job.lines],
     }
 
