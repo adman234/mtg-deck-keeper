@@ -108,6 +108,9 @@ class ScanImage(Base):
     height: Mapped[int] = mapped_column(Integer)
     sha256: Mapped[str] = mapped_column(String(64))
     crops_found: Mapped[int] = mapped_column(Integer, default=0)
+    # Result of reading the whole photo: number of cards listed, or why it failed.
+    photo_cards: Mapped[int | None] = mapped_column(Integer)
+    photo_error: Mapped[str | None] = mapped_column(Text)
     detections: Mapped[list["Detection"]] = relationship(cascade="all, delete-orphan", order_by="Detection.id")
 
 
@@ -127,7 +130,8 @@ class Detection(Base):
     model_confidence: Mapped[float] = mapped_column(Float, default=0.0)
     card_id: Mapped[int | None] = mapped_column(ForeignKey("cards.id"))
     match_score: Mapped[float] = mapped_column(Float, default=0.0)
-    # How the card was identified: name | printing | foreign:<lang> | choice
+    # How the card was identified: name | printing | foreign:<lang> | alias | choice,
+    # or 'unconfirmed' for a weak crop read the whole-photo pass didn't back up (not counted).
     match_method: Mapped[str | None] = mapped_column(String(20))
 
 

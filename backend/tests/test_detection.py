@@ -23,3 +23,15 @@ def test_finds_separate_cards_including_rotated_ones():
 
 def test_empty_table_finds_nothing():
     assert find_cards(_table_with_cards([])) == []
+
+
+def test_lone_art_box_is_dropped():
+    """A card whose black border blends into a dark mat is found only by its art box; that crop
+    has no title line, so it is dropped when the photo's other cards are full size."""
+    img = _table_with_cards([(250, 300, 0), (650, 300, 0), (1050, 300, 0)])
+    # The fourth card: border same colour as the mat, so only the art frame stands out.
+    cv2.fillPoly(img, [cv2.boxPoints(((650, 850), (252, 352), 0)).astype(np.int32)], (40, 90, 50))
+    cv2.fillPoly(img, [cv2.boxPoints(((650, 800), (180, 132), 0)).astype(np.int32)], (200, 210, 230))
+    found = find_cards(img)
+    assert len(found) == 3
+    assert all(f.bbox[1] < 600 for f in found)

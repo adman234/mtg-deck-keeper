@@ -91,6 +91,9 @@ const how = (l) => [...new Set(l.sources.map((s) => methodText(s.match_method)).
 const checkQty = (l) => !l.accepted && l.flags.some((f) => QTY_FLAGS.includes(f));
 const pillFlags = (l) => l.flags.filter((f) => !QTY_FLAGS.includes(f));
 const confClass = (l) => (!l.card ? "bad" : l.confidence >= scan.value.threshold ? "ok" : "warn");
+const failedPhotos = computed(() => (scan.value?.images || [])
+  .map((img, i) => ({ n: i + 1, error: img.photo_error }))
+  .filter((p) => p.error));
 const crops = (l) => l.sources.filter((s) => s.crop_url);
 const sourceText = (l) => {
   const photos = new Set(l.sources.map((s) => s.image_id));
@@ -135,6 +138,11 @@ const sourceText = (l) => {
     </div>
 
     <template v-if="['review', 'saved'].includes(scan.status)">
+      <div v-if="failedPhotos.length" class="alert warn">
+        The whole-photo read failed for {{ failedPhotos.map((p) => `photo ${p.n}`).join(", ") }}, so cards the
+        cut-outs missed aren't counted there. Press <b>Read again</b> to retry.
+        <span class="small">({{ failedPhotos[0].error }})</span>
+      </div>
       <div v-if="scan.status === 'saved' && scan.deck_id" class="alert ok">Saved as a deck. <RouterLink :to="`/decks/${scan.deck_id}`">Open deck</RouterLink></div>
 
       <div class="summary">
@@ -157,6 +165,10 @@ const sourceText = (l) => {
           <button v-if="crops(l).length" class="thumb" @click="zoom = crops(l)[0].crop_url" :aria-label="`Show crop for ${l.raw_name}`">
             <img :src="crops(l)[0].crop_url" alt="" loading="lazy" />
             <span v-if="crops(l).length > 1" class="more num">×{{ crops(l).length }}</span>
+          </button>
+          <button v-else-if="l.card?.image_uri" class="thumb ref" @click="zoom = l.card.image_uri"
+                  :aria-label="`Show ${l.card.name}`" title="Card image from Scryfall (no cut-out from your photo)">
+            <img :src="l.card.image_uri" alt="" loading="lazy" />
           </button>
           <div v-else class="thumb none" aria-hidden="true"></div>
 
@@ -239,7 +251,13 @@ const sourceText = (l) => {
         <div class="photos">
           <figure v-for="(img, i) in scan.images" :key="img.id">
             <button class="photo" @click="zoom = img.url"><img :src="img.url" :alt="`Photo ${i + 1}`" loading="lazy" /></button>
-            <figcaption class="sub small">Photo {{ i + 1 }}<span v-if="scan.prepass"> · {{ img.crops_found }} card{{ img.crops_found === 1 ? "" : "s" }} cut out</span></figcaption>
+            <figcaption class="sub small">
+              Photo {{ i + 1 }}
+              <span v-if="scan.prepass"> · {{ img.crops_found }} cut out</span>
+              <span v-if="img.photo_cards != null"> · {{ img.photo_cards }} listed from whole photo</span>
+              <span v-if="img.photo_error" class="warn-text"> · whole-photo read failed</span>
+              <span v-if="img.unconfirmed_crops"> · {{ img.unconfirmed_crops }} unreadable cut-out{{ img.unconfirmed_crops === 1 ? "" : "s" }} ignored</span>
+            </figcaption>
           </figure>
         </div>
       </section>
@@ -262,6 +280,8 @@ const sourceText = (l) => {
 .line.add { border-bottom: none; }
 .thumb { width: 52px; height: 72px; padding: 0; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; background: var(--surface-2); cursor: zoom-in; position: relative; }
 .thumb.none { cursor: default; border-style: dashed; opacity: 0.5; }
+.thumb.ref { opacity: 0.75; border-style: dashed; }
+.warn-text { color: var(--warn); font-weight: 600; }
 .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .more { position: absolute; right: 2px; bottom: 2px; background: var(--ink); color: var(--bg); font-size: 0.68rem; padding: 0 4px; border-radius: 3px; }
 .qty { display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }

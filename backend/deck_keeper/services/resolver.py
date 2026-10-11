@@ -23,6 +23,8 @@ log = logging.getLogger(__name__)
 
 GOOD = 90.0  # a name match at least this good is trusted without further lookups
 REASK_BELOW = 85.0
+REASK_FLOOR = 65.0  # below this the read is probably not a real title at all
+REASK_MARGIN = 10.0  # only candidates this close to the best match are offered
 
 
 @dataclass
@@ -91,16 +93,20 @@ async def resolve(db: Session, index: matching.CardIndex, read: vision.ReadCard,
             method = "alias" if lang == "en" else f"foreign:{lang}"[:20]
             return Resolution(_card_id(db, index, found["name"]), found["score"], method)
 
-    if opts.candidate_reask and crop_path and res.score < REASK_BELOW and candidates:
+    # Re-ask only breaks near-ties between real candidates. It must not overrule a clearly better
+    # name match, and its pick keeps the candidate's own score so the line stays flagged.
+    close = [h for h in hits if best and h.score >= best.score - REASK_MARGIN]
+    if opts.candidate_reask and crop_path and best and REASK_FLOOR <= best.score < REASK_BELOW and len(close) > 1:
         try:
             jpeg = Path(crop_path).read_bytes()
         except OSError:
             jpeg = None
         if jpeg:
-            choice = await ask(vision.choose_card(cfg, jpeg, candidates))
+            choice = await ask(vision.choose_card(cfg, jpeg, [h.name for h in close]))
             if choice:
                 name, conf = choice
-                return Resolution(_card_id(db, index, name), 88.0, "choice", confidence=conf)
+                picked = next(h for h in close if h.name == name)
+                return Resolution(picked.card_id, picked.score, "choice", confidence=min(conf, read.confidence))
 
     res.candidates = candidates
     return res

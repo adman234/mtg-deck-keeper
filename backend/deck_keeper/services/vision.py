@@ -36,26 +36,25 @@ CARD_SCHEMA = {
 
 SYSTEM_PROMPT = (
     "You identify Magic: The Gathering cards in photos. Read each card's title line exactly as printed. "
-    "Use the English card name when you recognise the card; otherwise copy the printed text. "
-    "Never invent a name you cannot read. Cards in other languages and showcase or borderless "
-    "frames are common: if you are not sure of the English name, copy the printed title exactly, in "
-    "its own script. Newer cards print a set code (3-5 letters, e.g. MID) and collector number "
-    "(e.g. 154/277) in small text at the bottom-left; include them whenever legible, as they "
-    "identify the card in any language. confidence is your probability (0-1) that the name is "
-    "correct. Reply with JSON only."
+    "Use the English card name when you recognise the card; otherwise copy the printed title exactly, "
+    "in its own language and script. Never invent a name you cannot read. confidence is your "
+    "probability (0-1) that the name is correct. Reply with JSON only."
 )
 
+# Kept short on purpose: small models list fewer cards when a whole-table prompt asks for more detail.
 PHOTO_PROMPT = (
     "List every distinct card visible in this photo. For each one, count how many copies of that "
     "card are visible (count each physical card once). Include cards that are partly covered if the "
-    'title is readable. Format: {"cards": [{"name": ..., "count": ..., "set": ..., '
-    '"collector_number": ..., "confidence": ...}]}'
+    'title is readable. List each card name only once. Format: {"cards": [{"name": ..., "count": ..., '
+    '"confidence": ...}]}'
 )
 
 CROP_PROMPT = (
-    "This image is a single Magic card. Return exactly one entry with count 1. If the image is not a "
-    'card or the title is unreadable, return {"cards": []}. Format: {"cards": [{"name": ..., '
-    '"count": 1, "set": ..., "collector_number": ..., "confidence": ...}]}'
+    "This image is a single Magic card. Return exactly one entry with count 1. If you can't see a "
+    'title line (for example only artwork is visible) or can\'t read it, return {"cards": []}. Newer '
+    "cards print a set code (3-5 letters, e.g. MID) and collector number (e.g. 154/277) in small text "
+    "at the bottom-left; include them if legible, they identify the card in any language. "
+    'Format: {"cards": [{"name": ..., "count": 1, "set": ..., "collector_number": ..., "confidence": ...}]}'
 )
 
 
@@ -101,8 +100,25 @@ async def list_models(cfg: VisionConfig) -> list[str]:
         return sorted(m["id"] for m in r.json().get("data", []))
 
 
+def _salvage(text: str) -> list:
+    """Recover the complete card objects from a reply that was cut off mid-way."""
+    items, decoder, i = [], json.JSONDecoder(), text.find("[")
+    while i >= 0:
+        i = text.find("{", i + 1)
+        if i < 0:
+            break
+        try:
+            obj, end = decoder.raw_decode(text[i:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and "name" in obj:
+            items.append(obj)
+            i += end - 1
+    return items
+
+
 def parse_cards(text: str) -> list[ReadCard]:
-    """Parse the model's reply, tolerating code fences and chatter around the JSON."""
+    """Parse the model's reply, tolerating code fences, chatter and replies that were cut off."""
     text = text.strip()
     fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
     if fence:
@@ -113,9 +129,13 @@ def parse_cards(text: str) -> list[ReadCard]:
     try:
         data, _ = json.JSONDecoder().raw_decode(text[start:])
     except json.JSONDecodeError as e:
-        raise VisionError(f"Model reply was not valid JSON: {e}") from e
+        data = _salvage(text[start:])
+        if not data:
+            raise VisionError(f"Model reply was not valid JSON: {e}") from e
+        log.warning("Model reply was cut off; recovered %d cards from it", len(data))
     items = data.get("cards", []) if isinstance(data, dict) else data
-    out = []
+    out: list[ReadCard] = []
+    seen: dict[str, ReadCard] = {}
     for item in items if isinstance(items, list) else []:
         if not isinstance(item, dict):
             continue
@@ -132,13 +152,21 @@ def parse_cards(text: str) -> list[ReadCard]:
             conf = 0.5
         if conf > 1:  # some models answer in percent
             conf = conf / 100
-        out.append(ReadCard(
+        key = name.casefold()
+        if key in seen:
+            # Small models sometimes repeat entries until they run out of tokens; a repeat is
+            # the same card, not more copies.
+            seen[key].count = max(seen[key].count, count)
+            continue
+        card = ReadCard(
             name=name,
             count=count,
             set=(str(item["set"]).strip() or None) if item.get("set") else None,
             collector_number=(str(item["collector_number"]).strip() or None) if item.get("collector_number") else None,
             confidence=min(1.0, max(0.0, conf)),
-        ))
+        )
+        seen[key] = card
+        out.append(card)
     return out
 
 

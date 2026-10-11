@@ -133,3 +133,64 @@ def test_foreign_card_identified_in_full_scan(admin):
     line = scan["lines"][0]
     assert (line["card"]["name"], line["qty"], line["needs_review"]) == ("Lightning Bolt", 4, False)
     assert line["sources"][0]["match_method"] == "printing" and line["raw_name"] == "稲妻"
+
+
+def _table_jpeg(cards):
+    """A photo of cards laid on a mat, so the OpenCV pre-pass has something to cut out."""
+    import cv2
+    import numpy as np
+    img = np.full((1200, 1600, 3), (40, 90, 50), np.uint8)
+    for cx, cy in cards:
+        for size, color in (((252, 352), (20, 20, 20)), ((226, 326), (180, 200, 220)), ((190, 140), (90, 60, 140))):
+            cv2.fillPoly(img, [cv2.boxPoints(((cx, cy), size, 0)).astype(np.int32)], color)
+    return cv2.imencode(".jpg", img)[1].tobytes()
+
+
+def _by_prompt(crop_reply, photo_reply):
+    def handler(request):
+        text = json.loads(request.content)["messages"][-1]["content"][0]["text"]
+        reply = crop_reply if "single Magic card" in text else photo_reply
+        return reply() if callable(reply) else reply
+    return httpx.MockTransport(handler)
+
+
+def _scan(admin, jpeg, prepass=True):
+    admin.put("/api/admin/settings", json={"values": {"vision.model": "daily"}})
+    scryfall.transport = httpx.MockTransport(lambda r: httpx.Response(404, json={}))
+    job_id = admin.post("/api/scans", data={"prepass": "true" if prepass else "false"},
+                        files=[("files", ("a.jpg", jpeg, "image/jpeg"))]).json()["id"]
+    asyncio.run(scanner.process_job(job_id))
+    return admin.get(f"/api/scans/{job_id}").json()
+
+
+def test_failed_whole_photo_read_is_reported_not_hidden(admin):
+    vision.transport = _by_prompt(chat_reply([{"name": "Counterspell", "count": 1, "confidence": 0.95}]),
+                                  httpx.Response(500, text="model crashed"))
+    scan = _scan(admin, _table_jpeg([(300, 300), (700, 300), (1100, 300)]))
+    assert scan["status"] == "review"
+    img = scan["images"][0]
+    assert img["crops_found"] == 3 and img["photo_cards"] is None and "500" in img["photo_error"]
+    assert scan["lines"][0]["qty"] == 3  # crops still count when the whole-photo read failed
+
+
+def test_weak_crop_the_whole_photo_did_not_see_is_not_counted(admin):
+    crops = iter([
+        chat_reply([{"name": "Counterspell", "count": 1, "confidence": 0.95}]),
+        chat_reply([{"name": "Counterspell", "count": 1, "confidence": 0.95}]),
+        chat_reply([{"name": "Mountian Thing", "count": 1, "confidence": 0.4}]),  # an art-only crop
+    ])
+    vision.transport = _by_prompt(lambda: next(crops),
+                                  chat_reply([{"name": "Counterspell", "count": 3, "confidence": 0.9}]))
+    scan = _scan(admin, _table_jpeg([(300, 300), (700, 300), (1100, 300)]))
+    names = {(ln["card"] or {}).get("name") or ln["raw_name"]: ln["qty"] for ln in scan["lines"]}
+    assert names == {"Counterspell": 3}
+    assert scan["images"][0]["unconfirmed_crops"] == 1
+
+
+def test_cut_off_photo_reply_still_counts(admin):
+    truncated = '{"cards":[{"name":"Mountain","count":4,"confidence":0.9},{"name":"Shock","count":2,"confidence":0.9},{"na'
+    vision.transport = _by_prompt(chat_reply([]), httpx.Response(200, json={
+        "choices": [{"message": {"content": truncated}, "finish_reason": "length"}]}))
+    scan = _scan(admin, _jpeg(), prepass=False)
+    names = {(ln["card"] or {}).get("name") or ln["raw_name"]: ln["qty"] for ln in scan["lines"]}
+    assert names["Mountain"] == 4 and names["Shock"] == 2
