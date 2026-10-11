@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from .. import app_settings
 from ..db import session_scope
 from ..models import Card, Detection, ScanImage, ScanJob, ScanLine
-from . import detection, matching, scryfall, vision
+from . import detection, matching, resolver, scryfall, vision
 
 log = logging.getLogger(__name__)
 
@@ -198,6 +198,12 @@ async def process_job(job_id: int) -> None:
         job.lines.clear()
         db.commit()
         sem = asyncio.Semaphore(max(1, vs["max_concurrency"]))
+        opts = resolver.Options.from_settings(vs)
+
+        async def ask(coro):
+            async with sem:
+                return await coro
+
         try:
             index = matching.get_index(db)
             if len(index) == 0:
@@ -216,16 +222,17 @@ async def process_job(job_id: int) -> None:
                 db.commit()
                 crops, reads = await _process_image(img, job.prepass, cfg, sem, vs["image_max_side"])
                 img.crops_found = crops
+                job.step = f"Identifying cards in photo {n} of {len(job.images)}"
+                db.commit()
                 for r in reads:
-                    matches = index.match(r.card.name, limit=1)
-                    m = matches[0] if matches and matches[0].score >= matching.MIN_SCORE else None
+                    res = await resolver.resolve(db, matching.get_index(db), r.card, r.crop_path, cfg, opts, ask)
                     img.detections.append(Detection(
                         source=r.source, crop_path=r.crop_path, bbox=r.bbox,
                         raw_name=r.card.name[:255], raw_set=(r.card.set or "")[:20] or None,
                         raw_number=(r.card.collector_number or "")[:20] or None,
                         qty=r.card.count if r.source == "photo" else 1,
-                        model_confidence=r.card.confidence,
-                        card_id=m.card_id if m else None, match_score=m.score if m else 0.0,
+                        model_confidence=res.confidence if res.confidence is not None else r.card.confidence,
+                        card_id=res.card_id, match_score=res.score, match_method=res.method,
                     ))
                 job.processed_images = n
                 db.commit()

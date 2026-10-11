@@ -64,6 +64,20 @@ export const FLAG_TEXT = {
   low_confidence: "Low confidence",
 };
 
+const LANGUAGES = { de: "German", fr: "French", it: "Italian", es: "Spanish", pt: "Portuguese", ja: "Japanese",
+  ko: "Korean", ru: "Russian", zhs: "Chinese", zht: "Chinese", he: "Hebrew", la: "Latin", grc: "Greek",
+  ar: "Arabic", sa: "Sanskrit", ph: "Phyrexian" };
+
+// How a card was identified, when it wasn't a plain English name match.
+export function methodText(method) {
+  if (!method || method === "name") return "";
+  if (method === "printing") return "Found by set code and collector number";
+  if (method === "alias") return "Found by alternate name";
+  if (method === "choice") return "Picked from similar cards";
+  if (method.startsWith("foreign:")) return `Found by ${LANGUAGES[method.slice(8)] || "foreign"} name`;
+  return "";
+}
+
 // Flags about the number of copies are shown on the quantity box, not as a pill.
 export const QTY_FLAGS = ["count_mismatch", "check_basic_count"];
 

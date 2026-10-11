@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useRouter } from "vue-router";
-import { api, BOARDS, FLAG_TEXT, FORMATS, QTY_FLAGS, fmtDate, pct } from "../api";
+import { api, BOARDS, FLAG_TEXT, FORMATS, QTY_FLAGS, fmtDate, methodText, pct } from "../api";
 import CardSearch from "../components/CardSearch.vue";
 
 const props = defineProps({ id: String });
@@ -87,6 +87,7 @@ const totals = computed(() => {
   return t;
 });
 const progress = computed(() => (scan.value?.total_images ? scan.value.processed_images / scan.value.total_images : 0));
+const how = (l) => [...new Set(l.sources.map((s) => methodText(s.match_method)).filter(Boolean))].join(" · ");
 const checkQty = (l) => !l.accepted && l.flags.some((f) => QTY_FLAGS.includes(f));
 const pillFlags = (l) => l.flags.filter((f) => !QTY_FLAGS.includes(f));
 const confClass = (l) => (!l.card ? "bad" : l.confidence >= scan.value.threshold ? "ok" : "warn");
@@ -180,6 +181,7 @@ const sourceText = (l) => {
                 <span v-if="l.sources.length">{{ sourceText(l) }}</span>
                 <span v-else>Added by you</span>
               </p>
+              <p v-if="l.card && how(l)" class="sub small how">{{ how(l) }}</p>
               <div v-if="pillFlags(l).length && !l.accepted" class="row" style="gap:6px">
                 <span v-for="f in pillFlags(l)" :key="f" class="pill" :class="f === 'unmatched' ? 'bad' : 'warn'">{{ FLAG_TEXT[f] || f }}</span>
               </div>
@@ -269,6 +271,7 @@ const sourceText = (l) => {
 .qty-note { font-size: 0.75rem; font-weight: 600; color: var(--warn); }
 .name { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .unknown { color: var(--bad); }
+.how { color: var(--accent); }
 .suggest { gap: 6px; }
 .conf { justify-self: start; }
 .actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }

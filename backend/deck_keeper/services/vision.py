@@ -37,9 +37,12 @@ CARD_SCHEMA = {
 SYSTEM_PROMPT = (
     "You identify Magic: The Gathering cards in photos. Read each card's title line exactly as printed. "
     "Use the English card name when you recognise the card; otherwise copy the printed text. "
-    "Never invent a name you cannot read. If the set code or collector number at the bottom-left "
-    "is clearly legible, include it, otherwise leave it out. confidence is your probability (0-1) "
-    "that the name is correct. Reply with JSON only."
+    "Never invent a name you cannot read. Cards in other languages and showcase or borderless "
+    "frames are common: if you are not sure of the English name, copy the printed title exactly, in "
+    "its own script. Newer cards print a set code (3-5 letters, e.g. MID) and collector number "
+    "(e.g. 154/277) in small text at the bottom-left; include them whenever legible, as they "
+    "identify the card in any language. confidence is your probability (0-1) that the name is "
+    "correct. Reply with JSON only."
 )
 
 PHOTO_PROMPT = (
@@ -214,3 +217,67 @@ async def read_cards(cfg: VisionConfig, jpeg: bytes, single_card: bool) -> list[
         "The model returned an empty reply. Check that it can see images (llama-server needs "
         "--mmproj) and look at the llama-swap log for errors."
     )
+
+
+CHOICE_PROMPT = (
+    "This image is a single Magic card whose title was hard to read. Which of these cards is it? "
+    "Compare the title, art, mana cost and text box. Answer with one name exactly as listed, or "
+    '"none" if it is none of them. Format: {"name": ..., "confidence": ...}\n\nCandidates:\n'
+)
+
+
+async def choose_card(cfg: VisionConfig, jpeg: bytes, candidates: list[str]) -> tuple[str, float] | None:
+    """Ask the model to pick which candidate a single-card image shows. Returns (name, confidence)."""
+    options = list(dict.fromkeys(candidates))[:8]
+    if not options:
+        return None
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string", "enum": [*options, "none"]},
+                       "confidence": {"type": "number", "minimum": 0, "maximum": 1}},
+        "required": ["name", "confidence"],
+    }
+    body = {
+        "model": cfg.model,
+        "temperature": 0,
+        "max_tokens": 512,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": CHOICE_PROMPT + "\n".join(f"- {o}" for o in options)},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()}},
+        ]}],
+        "response_format": {"type": "json_schema", "json_schema": {"name": "choice", "schema": schema}},
+    }
+    if cfg.disable_thinking:
+        body["chat_template_kwargs"] = {"enable_thinking": False}
+    try:
+        async with _client(cfg) as client:
+            r = await client.post("/chat/completions", json=body)
+            while r.status_code in (400, 422):
+                field = next((f for f in OPTIONAL_FIELDS if f in body and f in r.text), None)
+                if field is None:
+                    break
+                body.pop(field)
+                r = await client.post("/chat/completions", json=body)
+            r.raise_for_status()
+        content, reasoning = _message_text(r.json()["choices"][0]["message"])
+    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as e:
+        log.info("Candidate re-ask failed: %s", e)
+        return None
+    for text in (content, reasoning):
+        start = text.find("{")
+        if start < 0:
+            continue
+        try:
+            data, _ = json.JSONDecoder().raw_decode(text[start:])
+        except json.JSONDecodeError:
+            continue
+        name = str(data.get("name", "")).strip() if isinstance(data, dict) else ""
+        match = next((o for o in options if o.casefold() == name.casefold()), None)
+        if match:
+            try:
+                conf = float(data.get("confidence", 0.6))
+            except (TypeError, ValueError):
+                conf = 0.6
+            return match, min(1.0, max(0.0, conf / 100 if conf > 1 else conf))
+        return None
+    return None

@@ -1,4 +1,23 @@
-# Foreign-language and showcase cards: options
+# Foreign-language and showcase cards
+
+**Status:** options 1, 2 and 3 below are built and on by default. Each one can be turned off
+in Settings → Vision model. A card is identified in this order:
+
+1. Fuzzy match against the English card list. A match of 90% or better is used straight away.
+2. **Set code + collector number** → the exact printing on Scryfall. Used when the printed
+   name agrees with the read name, or when the name is in a script we can't compare
+   (Japanese, Russian, …), so a misread number can't swap in a random card.
+3. **Foreign or alternate name** → Scryfall search across all languages, including flavor names
+   such as Godzilla cards.
+4. **Ask again** → for an unclear cut-out card, the model sees it again with up to 8 likely names
+   and must pick one or "none".
+
+Scryfall answers (including "not found") are cached in the database. "Not found" is retried
+after 7 days. If Scryfall can't be reached, steps 2–3 are skipped and the card goes to review as before.
+The review screen says how each card was found, e.g. "Found by German name".
+
+The original options list follows.
+
 
 Right now the model is asked for the English name if it recognises the card, and the result is
 fuzzy-matched against Scryfall's English name list. That works for most English cards, including
