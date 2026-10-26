@@ -80,6 +80,73 @@ async function save() {
 
 const lines = computed(() => scan.value?.lines || []);
 const shown = computed(() => (onlyFlagged.value ? lines.value.filter((l) => l.needs_review) : lines.value));
+
+// Order: lines to review first, then by photo, and within a photo top to bottom, left to right
+// (where the card was found), so the list reads like the table. Or A to Z.
+const SORTS = [{ value: "photo", label: "Photo order" }, { value: "az", label: "A–Z" }];
+const sortBy = ref(readPref("scan-sort", "photo"));
+watch(sortBy, (v) => writePref("scan-sort", v));
+function readPref(key, fallback) {
+  try { return localStorage.getItem(key) || fallback; } catch { return fallback; }
+}
+function writePref(key, value) {
+  try { localStorage.setItem(key, value); } catch { /* private window: not remembered */ }
+}
+const lineName = (l) => l.card?.name || l.raw_name;
+const byName = (a, b) => lineName(a).localeCompare(lineName(b));
+const centreY = (b) => b[1] + b[3] / 2;
+// Each line's place: the first photo it was found in, then its row and left-to-right position there.
+const places = computed(() => {
+  const out = new Map();
+  (scan.value?.images || []).forEach((img, photo) => {
+    const here = [];
+    for (const l of lines.value) {
+      if (out.has(l.id) || !l.sources.some((s) => s.image_id === img.id)) continue;
+      const boxes = l.sources.filter((s) => s.image_id === img.id && s.bbox).map((s) => s.bbox);
+      boxes.sort((a, b) => centreY(a) - centreY(b) || a[0] - b[0]);
+      here.push({ l, box: boxes[0] || null });
+    }
+    // Rows: a box joins the row above when its centre is within half a typical card height.
+    const boxed = here.filter((e) => e.box).sort((a, b) => centreY(a.box) - centreY(b.box));
+    const heights = boxed.map((e) => e.box[3]).sort((a, b) => a - b);
+    const half = (heights[Math.floor(heights.length / 2)] || 0) / 2;
+    let row = -1;
+    let rowY = -Infinity;
+    for (const e of boxed) {
+      if (Math.abs(centreY(e.box) - rowY) >= half) { row += 1; rowY = centreY(e.box); }
+      e.row = row;
+    }
+    boxed.sort((a, b) => a.row - b.row || a.box[0] - b.box[0]);
+    const ordered = [...boxed, ...here.filter((e) => !e.box).sort((a, b) => byName(a.l, b.l))];
+    ordered.forEach((e, order) => out.set(e.l.id, { photo, order }));
+  });
+  return out;
+});
+const byPlace = (a, b) => {
+  const pa = places.value.get(a.id), pb = places.value.get(b.id);
+  if (!pa || !pb) return pa ? -1 : pb ? 1 : byName(a, b);
+  return pa.photo - pb.photo || pa.order - pb.order;
+};
+const groups = computed(() => {
+  const review = shown.value.filter((l) => l.needs_review);
+  const rest = shown.value.filter((l) => !l.needs_review);
+  const out = [];
+  if (review.length) out.push({ key: "review", title: "To review", lines: [...review].sort(sortBy.value === "az" ? byName : byPlace) });
+  if (sortBy.value === "az") {
+    if (rest.length) out.push({ key: "rest", title: review.length ? "Checked" : "", lines: [...rest].sort(byName) });
+    return out;
+  }
+  if (onlyFlagged.value) return out;
+  scan.value.images.forEach((img, i) => {
+    const here = rest.filter((l) => places.value.get(l.id)?.photo === i).sort(byPlace);
+    out.push({ key: `photo-${img.id}`, title: `Photo ${i + 1}`, img, lines: here });
+  });
+  const added = rest.filter((l) => !places.value.has(l.id)).sort(byName);
+  if (added.length) out.push({ key: "added", title: "Added by you", lines: added });
+  return out;
+});
+const setPhotoBoard = (img, board) =>
+  act(() => api(`/api/scans/${props.id}/images/${img.id}/board`, { method: "PUT", body: { board } }));
 const flagged = computed(() => lines.value.filter((l) => l.needs_review).length);
 const unmatched = computed(() => lines.value.filter((l) => !l.card).length);
 const totals = computed(() => {
@@ -190,14 +257,30 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
           <span :class="flagged ? 'pill warn' : 'pill ok'">{{ flagged ? `${flagged} to review` : "All checked" }}</span>
         </div>
         <div class="row">
+          <label class="sort sub small">Sort
+            <select v-model="sortBy" aria-label="Sort lines">
+              <option v-for="o in SORTS" :key="o.value" :value="o.value">{{ o.label }}</option>
+            </select>
+          </label>
           <label class="check" style="align-items:center"><input id="only-flagged" v-model="onlyFlagged" type="checkbox" />Only flagged</label>
           <button class="btn small" :disabled="!flagged || flagged === unmatched" @click="acceptAll">Accept all matched</button>
         </div>
       </div>
 
-      <div class="panel" style="padding:0">
+      <div class="panel" style="padding:0;gap:0;overflow:hidden">
         <div v-if="!shown.length" class="empty">{{ onlyFlagged ? "Nothing left to review." : "The model didn't find any cards. Try reading again or add cards below." }}</div>
-        <div v-for="l in shown" :key="l.id" class="line" :class="{ review: l.needs_review }">
+        <template v-for="g in groups" :key="g.key">
+        <div v-if="g.title" class="group" :class="{ 'group-review': g.key === 'review' }">
+          <strong>{{ g.title }}</strong>
+          <span v-if="g.img" class="sub small file">{{ g.img.filename }}</span>
+          <label v-if="g.img" class="sub small group-board">All cards in this photo
+            <select :value="g.img.board" @change="setPhotoBoard(g.img, $event.target.value)" :aria-label="`Board for ${g.title}`">
+              <option v-for="b in BOARDS" :key="b.value" :value="b.value">{{ b.label }}</option>
+            </select>
+          </label>
+        </div>
+        <div v-if="g.img && !g.lines.length" class="group-empty sub small">Everything from this photo is under “To review”.</div>
+        <div v-for="l in g.lines" :key="l.id" class="line" :class="{ review: l.needs_review }">
           <button v-if="crops(l).length" class="thumb" @click="zoom = crops(l)[0].crop_url" :aria-label="`Show crop for ${l.raw_name}`">
             <img :src="crops(l)[0].crop_url" alt="" loading="lazy" />
             <span v-if="crops(l).length > 1" class="more num">×{{ crops(l).length }}</span>
@@ -264,6 +347,7 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
             <button class="btn small danger" @click="removeLine(l)" :aria-label="`Remove ${l.card?.name || l.raw_name}`">Remove</button>
           </div>
         </div>
+        </template>
 
         <div class="line add">
           <div class="thumb none" aria-hidden="true"></div>
@@ -342,6 +426,11 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
               <span v-if="img.photo_error" class="warn-text"> · whole-photo read failed</span>
               <span v-if="img.unconfirmed_crops"> · {{ img.unconfirmed_crops }} unreadable cut-out{{ img.unconfirmed_crops === 1 ? "" : "s" }} ignored</span>
             </figcaption>
+            <label class="sub small photo-board">Cards in this photo go to
+              <select :value="img.board" @change="setPhotoBoard(img, $event.target.value)" :aria-label="`Board for photo ${i + 1}`">
+                <option v-for="b in BOARDS" :key="b.value" :value="b.value">{{ b.label }}</option>
+              </select>
+            </label>
           </figure>
         </div>
       </section>
@@ -373,6 +462,15 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
   padding: 10px 14px; border-bottom: 1px solid var(--line); }
 .line.review { background: color-mix(in srgb, var(--warn-soft) 45%, transparent); box-shadow: inset 3px 0 0 var(--warn); }
 .line.add { border-bottom: none; }
+.group { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 14px; background: var(--surface-2);
+  border-bottom: 1px solid var(--line); border-top: 2px solid var(--line); font-size: 0.9rem; }
+.group:first-child { border-top: none; }
+.group-review { color: var(--warn); }
+.group .file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.group-board, .photo-board, .sort { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+.group-board select, .photo-board select, .sort select { padding: 3px 6px; font-size: 0.82rem; width: auto; }
+.photo-board { margin-left: 0; }
+.group-empty { padding: 8px 14px; border-bottom: 1px solid var(--line); }
 .thumb { width: 52px; height: 72px; padding: 0; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; background: var(--surface-2); cursor: zoom-in; position: relative; }
 .thumb.none { cursor: default; border-style: dashed; opacity: 0.5; }
 .thumb.ref { opacity: 0.75; border-style: dashed; }

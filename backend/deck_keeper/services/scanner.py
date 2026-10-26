@@ -167,6 +167,7 @@ def _unconfirmed(det: Detection, photo_card_ids: set[int]) -> bool:
 
 
 SURE_MATCH = 85.0  # below this the "match" is only the nearest spelling
+ACCEPT_MATCH = 80.0  # below this it isn't taken at all ("Force of One" is not Forest)
 
 # Constructed decks allow at most 4 copies of a card, except basic lands and cards that
 # say otherwise. Counts above the limit are almost always a miscounted pile.
@@ -203,12 +204,14 @@ def build_lines(db: Session, job: ScanJob, threshold: float) -> list[ScanLine]:
 
     Within a photo the quantity is the larger of (crops showing the card, count read
     from the whole photo), so the two passes never double count. Photos are assumed
-    to show different physical cards and are summed.
+    to show different physical cards and are summed. Cards in a photo marked as another
+    board (a photo of the sideboard) make lines of their own.
     """
     index = matching.get_index(db)
     names = {}
-    agg: dict[object, dict] = {}
+    agg: dict[tuple, dict] = {}
     for img in job.images:
+        board = img.board or "main"
         crop_counts: dict[object, int] = defaultdict(int)
         photo_counts: dict[object, int] = defaultdict(int)
         per_key: dict[object, list[Detection]] = defaultdict(list)
@@ -220,24 +223,31 @@ def build_lines(db: Session, job: ScanJob, threshold: float) -> list[ScanLine]:
             per_key[key].append(d)
         for key, dets in per_key.items():
             c, p = crop_counts.get(key, 0), photo_counts.get(key, 0)
-            line = agg.setdefault(key, {"qty": 0, "dets": [], "disagree": False})
+            line = agg.setdefault((key, board), {"qty": 0, "dets": [], "disagree": False})
             line["qty"] += max(c, p)
             line["dets"].extend(dets)
             if (c and p and c != p) or any((d.raw or {}).get("count_differs") for d in dets):
                 line["disagree"] = True
 
     lines = []
-    for key, data in agg.items():
+    for (key, board), data in agg.items():
         dets: list[Detection] = data["dets"]
         best = max(dets, key=lambda d: d.model_confidence * d.match_score)
         conf = min(d.model_confidence * (d.match_score / 100 if d.card_id else 0) for d in dets)
         card_id = key if not isinstance(key, tuple) else None
         if card_id is not None and card_id not in names:
             names[card_id] = db.get(Card, card_id).name
-        suggestions = [
+        # Cards the rest of the row was read as come first: when a repeated whole-table name and
+        # an unreadable close-up leave a card to the user, it's usually one of those.
+        suggestions = [{"card_id": m.card_id, "name": m.name, "score": m.score}
+                       for name in dict.fromkeys(n for d in dets for n in (d.raw or {}).get("suggest", []))
+                       for m in index.match(name, limit=1) if m.card_id != card_id]
+        suggestions += [
             {"card_id": m.card_id, "name": m.name, "score": m.score}
-            for m in index.match(best.raw_name, limit=4) if m.card_id != card_id and m.score >= matching.MIN_SCORE
-        ][:3]
+            for m in index.match(best.raw_name, limit=4)
+            if m.card_id != card_id and m.score >= matching.MIN_SCORE and m.card_id not in {x["card_id"] for x in suggestions}
+        ]
+        suggestions = suggestions[:4]
         qty, capped = data["qty"], False
         limit = copy_limit(names.get(card_id)) if card_id is not None else None
         if limit is not None and qty > limit:
@@ -250,7 +260,7 @@ def build_lines(db: Session, job: ScanJob, threshold: float) -> list[ScanLine]:
             card_id=card_id,
             raw_name=best.raw_name,
             qty=qty,
-            board="main",
+            board=board,
             confidence=line["confidence"],
             flags=_flags_for(line, threshold),
             suggestions=suggestions,
@@ -330,7 +340,7 @@ async def process_job(job_id: int) -> None:
                         card = vision.ReadCard(name=choice.name, count=choice.count, confidence=conf,
                                                set=r.card.set, collector_number=r.card.collector_number)
                     res = await resolver.resolve(db, matching.get_index(db), card, r.crop_path, cfg, opts, ask)
-                    if r.source == "photo" and res.score < SURE_MATCH:
+                    if r.source == "photo" and res.score < SURE_MATCH and not (choice.repeated and choice.used == "zoom"):
                         # Neither read matched cleanly. Look the other name up too (the close-up may
                         # have read the type line, the whole-table read a foreign title) and keep
                         # whichever finds a card more convincingly.
@@ -346,6 +356,11 @@ async def process_job(job_id: int) -> None:
                                 card, res = alt, alt_res
                                 raw["both_names"]["kept"] = other
                                 raw["used"] = "photo" if choice.used == "zoom" else "zoom"
+                    if res.method in ("name", "choice") and res.score < ACCEPT_MATCH:
+                        # Too far from any card name to guess: leave it for the user to pick.
+                        res.card_id = None
+                    if r.source == "photo" and choice.suggest:
+                        raw["suggest"] = choice.suggest
                     img.detections.append(Detection(
                         source=r.source, crop_path=r.crop_path, bbox=r.bbox,
                         raw_name=card.name[:255], raw_set=(r.card.set or "")[:20] or None,

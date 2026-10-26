@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 
 GOOD = 90.0  # a name match at least this good is trusted without further lookups
 REASK_BELOW = 85.0
-REASK_FLOOR = 65.0  # below this the read is probably not a real title at all
+REASK_FLOOR = 80.0  # below this the read is too far from any title to guess: the user picks
 REASK_MARGIN = 10.0  # only candidates this close to the best match are offered
 
 

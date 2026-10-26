@@ -8,7 +8,7 @@ as review thumbnails and show where in the photo each line came from.
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
@@ -36,6 +36,7 @@ ROW_X_OVERLAP = 0.5  # in the same row, a box and a found card overlapping this 
 STRONG_MATCH = 80.0  # both reads name a real card this convincingly: ask the model to choose
 NEIGHBOUR_MATCH = 75.0
 PATTERN_FILL = 3  # one name given to this many single cards in a photo is the model repeating itself
+REPEATED_TRUST = 85.0  # a close-up must match this well to replace a repeated whole-table name
 
 
 def _iou(a: list[float], b: list[float]) -> float:
@@ -305,6 +306,8 @@ class Decision:
     used: str  # photo | zoom
     count_differs: bool
     unsure: bool = False  # the close-up couldn't confirm the name
+    repeated: bool = False  # the whole-table name was repeated along a row, so it's no fallback
+    suggest: list[str] = field(default_factory=list)  # cards to offer first if left to the user
 
 
 def count_fans(img: np.ndarray, cards: list[vision.ReadCard]) -> None:
@@ -320,7 +323,8 @@ def combine_counts(photo: int, zoom: int | None, fan: fans.FanCount | None = Non
 
     - Slivers counted by OpenCV win: the models can't count stacked card edges reliably (in the
       elves photo they said 5 or 6 for piles of 4). It can only count cards that show an edge,
-      so a card hidden exactly behind another is missed. A count of 1 means it saw no slivers
+      so a card hidden exactly behind another is missed; when it counts 2 or more fewer than
+      both models, the line is flagged. A count of 1 means it saw no slivers
       (a squared-up pile, or the fan went unseen), so the models' counts are used instead.
 
     - Close-up says 1, whole table says more: the close-up box held only the front card and
@@ -330,7 +334,8 @@ def combine_counts(photo: int, zoom: int | None, fan: fans.FanCount | None = Non
     Either way the line is flagged so the quantity gets a look.
     """
     if fan is not None and fan.count >= 2:
-        return fan.count, False
+        # Far fewer than both models say: worth a look (a missed sliver, or a hidden card).
+        return fan.count, zoom is not None and fan.count < min(photo, zoom) - 1
     if zoom is None or zoom == photo:
         return photo, False
     if zoom == 1 and photo >= 2:
@@ -414,16 +419,16 @@ def _judge(index: matching.CardIndex, card: vision.ReadCard, others: list[vision
                 return keep_photo
         group = _pattern_group(index, card, others, photo_hit)
         if group:
-            if zoom_score >= STRONG_MATCH:
-                return Decision(zoom.name, count, "zoom", differs)
-            # The repeated name is likely wrong and the close-up is no help either. The close-ups
-            # of the others with that name show which cards the row really holds: ask which.
-            options = [photo_hit.name]
+            if zoom_score >= REPEATED_TRUST:
+                return Decision(zoom.name, count, "zoom", differs, repeated=True)
+            # The repeated name is likely wrong and the close-up is no help either: leave it to
+            # the user, offering the cards the row's other close-ups read (often the right one).
+            suggest = []
             for o in group:
                 hit = _best(index, getattr(o.extra.get("zoom"), "name", ""))
-                if hit and hit.score >= STRONG_MATCH and hit.name not in options:
-                    options.append(hit.name)
-            return _ask_or_pick(card, options, keep_photo, photo_hit) if len(options) > 1 else keep_photo
+                if o is not card and hit and hit.score >= REPEATED_TRUST and hit.name not in suggest:
+                    suggest.append(hit.name)
+            return Decision(zoom.name, count, "zoom", differs, unsure=True, repeated=True, suggest=suggest)
         if zoom_hit and photo_score >= NEIGHBOUR_MATCH:
             # The close-up read the title of the card next to it (its box sat over the gap).
             for o in _neighbours(card, others):

@@ -115,6 +115,8 @@ class ScanImage(Base):
     photo_error: Mapped[str | None] = mapped_column(Text)
     # Raw-data view: the model's whole-photo reply, box scale used, entries dropped as duplicates.
     debug: Mapped[dict | None] = mapped_column(JSON)
+    # Board for every card found in this photo (e.g. a photo of the sideboard).
+    board: Mapped[str] = mapped_column(String(20), default="main", server_default="main")
     detections: Mapped[list["Detection"]] = relationship(cascade="all, delete-orphan", order_by="Detection.id")
 
 

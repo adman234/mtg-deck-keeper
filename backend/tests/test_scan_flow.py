@@ -204,3 +204,33 @@ def test_layout_defaults_to_auto_and_old_values_still_work(admin):
     r = admin.post(f"/api/scans/{scan['id']}/rerun", json={"layout": "spread"})
     assert r.status_code == 200 and r.json()["layout"] == "spread"
     assert admin.post(f"/api/scans/{scan['id']}/rerun", json={"layout": "heap"}).status_code in (400, 409)
+
+
+def test_photo_moved_to_sideboard_and_kept_on_read_again(admin):
+    """Both photos show 2 Swiftspears: moving photo 2 to the sideboard splits that line 2 + 2,
+    a card only in photo 2 moves whole, and reading the scan again keeps the photo's board."""
+    admin.put("/api/admin/settings", json={"values": {"vision.model": "daily"}})
+    replies = iter([[{"name": "Monastery Swiftspear", "count": 2, "confidence": 0.97}],
+                    [{"name": "Monastery Swiftspear", "count": 2, "confidence": 0.97},
+                     {"name": "Lightning Bolt", "count": 3, "confidence": 0.97}]] * 2)
+    vision.transport = httpx.MockTransport(lambda r: chat_reply(next(replies)))
+    scryfall.transport = httpx.MockTransport(lambda r: httpx.Response(404, json={}))
+    job_id = admin.post("/api/scans", data={"prepass": "false"},
+                        files=[("files", ("a.jpg", _jpeg(), "image/jpeg")), ("files", ("b.jpg", _jpeg(), "image/jpeg"))]).json()["id"]
+    asyncio.run(scanner.process_job(job_id))
+    scan = admin.get(f"/api/scans/{job_id}").json()
+    photo2 = scan["images"][1]["id"]
+    assert scan["images"][1]["board"] == "main"
+
+    def boards(scan):
+        return sorted((ln["card"]["name"], ln["board"], ln["qty"]) for ln in scan["lines"])
+
+    scan = admin.put(f"/api/scans/{job_id}/images/{photo2}/board", json={"board": "side"}).json()
+    assert scan["images"][1]["board"] == "side"
+    expected = [("Lightning Bolt", "side", 3), ("Monastery Swiftspear", "main", 2), ("Monastery Swiftspear", "side", 2)]
+    assert boards(scan) == expected
+    assert admin.put(f"/api/scans/{job_id}/images/{photo2}/board", json={"board": "nope"}).status_code == 400
+
+    admin.post(f"/api/scans/{job_id}/rerun", json={})
+    asyncio.run(scanner.process_job(job_id))
+    assert boards(admin.get(f"/api/scans/{job_id}").json()) == expected

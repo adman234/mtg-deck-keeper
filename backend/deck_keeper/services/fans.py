@@ -20,6 +20,7 @@ CARD_H = round(CARD_W * 88 / 63)
 EDGE_W = 0.06  # template: this much of a card's width from its edge inwards
 BAND = (0.1, 0.9)  # rows of the card used (clear of the stepped tops and bottoms)
 MIN_STEP, MAX_STEP = 0.05, 0.45  # gap between neighbouring slivers, in card widths
+FIRST_STEP = 0.09  # the first sliver: its card's own border sits ~0.08 in from its sleeve edge
 STEP_RATIO = 0.6
 MATCH = 0.4  # template match needed to count an edge
 SLIVER_ALIKE = 0.3  # and a sliver must look this much like the one before it
@@ -74,26 +75,34 @@ def _long_edges(gray: np.ndarray) -> np.ndarray:
 
 def _chain(scores: np.ndarray, start: int, stop: int, alike) -> list[tuple[int, float]]:
     """Walk left from `start` along template matches spaced like slivers, no further than `stop`.
-    A step must be at least STEP_RATIO of the previous one: a sliver's sleeve edge and card edge
-    sit close together and both look like an edge. alike(new, previous, width) checks the new
-    sliver looks like the previous one, so a gap of table and the next pile's edge don't count."""
+
+    Inside each sliver the card's own border sits a little way from the sleeve edge and also
+    looks like an edge, so the next edge is the good match whose step best matches the previous
+    step (fanned cards are spaced fairly evenly), and a step must be at least STEP_RATIO of the
+    previous one. For the first step, with nothing to compare, it's the nearest good match at
+    least FIRST_STEP away.
+    alike(new, previous, width) checks the new sliver looks like the previous one, so a gap of
+    table and the next pile's edge don't count."""
     out = []
     e, step = start, None
     while True:
-        near = MIN_STEP * CARD_W if step is None else max(MIN_STEP * CARD_W, STEP_RATIO * step)
+        near = FIRST_STEP * CARD_W if step is None else max(MIN_STEP * CARD_W, STEP_RATIO * step)
         lo, hi = max(stop, int(e - MAX_STEP * CARD_W)), int(e - near)
         if hi <= lo:
             break
         window = scores[lo:hi + 1]
-        best = window.max()
+        best = float(window.max())
         if best < MATCH:
             break
-        # The nearest good match: a farther one would skip a sliver.
-        peaks = [i for i in range(len(window)) if window[i] >= max(MATCH, best * 0.8)
+        good = max(MATCH, best * 0.8)
+        peaks = [lo + i for i in range(len(window)) if window[i] >= good
                  and (i == 0 or window[i] >= window[i - 1]) and (i == len(window) - 1 or window[i] >= window[i + 1])]
-        new = lo + peaks[-1]
-        width = (e - new) if step is None else min(e - new, step)
-        if not alike(new, e, width):
+        if step is None:
+            peaks.sort(reverse=True)  # nearest first
+        else:
+            peaks.sort(key=lambda c: abs((e - c) - step))
+        new = next((c for c in peaks if alike(c, e, (e - c) if step is None else min(e - c, step))), None)
+        if new is None:
             break
         step, e = e - new, new
         out.append((e, float(scores[e])))

@@ -414,8 +414,9 @@ def test_repeated_whole_table_name_gives_way_to_the_close_ups():
         e.extra["bbox"] = [i * 300, 500, 290, 400]
         e.extra["zoom"] = vision.ZoomRead(z, 1, 0.9, "{}")
     d = [piles.decide(index, e, entries) for e in entries]
-    assert [x.name for x in d] == ["Forest", "Misty Rainforest", "Bayou", "Bayou"]
-    assert d[1].unsure and not d[0].unsure
+    assert [x.name for x in d] == ["Forest", "Horizon s Edge", "Bayou", "Bayou"]
+    assert d[1].unsure and d[1].repeated and not d[0].unsure
+    assert d[1].suggest == ["Forest", "Bayou"]  # what the rest of the row was read as
 
 
 def test_close_up_reading_the_card_below_keeps_the_whole_table_name():
@@ -486,27 +487,36 @@ def test_model_unable_to_choose_keeps_the_whole_table_name():
     assert (d.name, d.used, d.unsure) == ("Abrupt Decay", "photo", True)
 
 
-def test_repeated_name_with_unreadable_close_up_asks_among_the_rows_cards(tmp_path):
-    """Scan 13: four "Meticulous Artisan" for a Forest and three Bayous. One close-up read
-    "Joraga"; the others read Forest and Bayou, so the model is asked to choose among those."""
-    import numpy as np
-    from deck_keeper.services.matching import CardIndex
-    index = CardIndex([(1, "Meticulous Artisan"), (2, "Forest"), (3, "Bayou"), (4, "Joraga Treespeaker")])
-    entries = [_card("Meticulous Artisan", count=1) for _ in range(4)]
-    for i, (e, z) in enumerate(zip(entries, ["Foreste", "Joraga", "Bayou", "Bayou"])):
-        e.extra["bbox"] = [i * 360, 520, 350, 476]
-        e.extra["zoom"] = vision.ZoomRead(z, 1, 1.0, "{}")
-    asked = []
+def test_repeated_name_with_unreadable_close_up_is_left_to_the_user(admin):
+    """Scan 13: four "Meticulous Artisan" for a Forest and three Bayous. One close-up misread the
+    Forest as "Force of One", which is far from any card: the line is left unmatched, with
+    Forest and Bayou offered first, and never falls back to the repeated name."""
+    from deck_keeper.db import session_scope
+    from deck_keeper.models import Card
+    with session_scope() as db:
+        for name in ("Meticulous Artisan", "Forest", "Bayou", "Force of Will", "Force of Vigor"):
+            db.add(Card(name=name))
+        db.flush()
+        matching.rebuild(db)
+    reads = iter(["Force of One", "Bayou", "Bayou", "Bayou"])
 
     def model(request):
-        asked.append(json.loads(request.content)["response_format"]["json_schema"]["schema"]["properties"]["name"]["enum"])
-        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"name": "Forest", "confidence": 0.9})}}]})
+        text = json.loads(request.content)["messages"][-1]["content"][0]["text"]
+        if "close-up" in text:
+            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(
+                {"name": next(reads), "count": 1, "confidence": 1})}}]})
+        if "Candidates" in text:
+            raise AssertionError("the model must not be asked to choose here")
+        return chat_reply([{"name": "Meticulous Artisan", "count": 1, "confidence": 1, "box": [x, 300, x + 150, 600]}
+                           for x in (100, 300, 500, 700)])
 
     vision.transport = httpx.MockTransport(model)
-    try:
-        asyncio.run(piles.settle(np.full((1807, 2400, 3), 90, np.uint8), entries, index,
-                                 vision.VisionConfig(base_url="http://x/v1", model="daily"), asyncio.Semaphore(1)))
-    finally:
-        vision.transport = None
-    assert asked == [["Meticulous Artisan", "Forest", "Bayou", "none"]]
-    assert [piles.decide(index, e, entries).name for e in entries] == ["Foreste", "Forest", "Bayou", "Bayou"]
+    scryfall.transport = httpx.MockTransport(lambda r: httpx.Response(404, json={}))
+    admin.put("/api/admin/settings", json={"values": {"vision.model": "daily"}})
+    job_id = admin.post("/api/scans", files=[("files", ("a.jpg", _table_jpeg([(300, 300)]), "image/jpeg"))]).json()["id"]
+    asyncio.run(scanner.process_job(job_id))
+    lines = admin.get(f"/api/scans/{job_id}").json()["lines"]
+    unmatched = [ln for ln in lines if ln["card"] is None]
+    assert len(unmatched) == 1 and "unmatched" in unmatched[0]["flags"]
+    assert [s["name"] for s in unmatched[0]["suggestions"]][:1] == ["Bayou"]
+    assert not any(ln["card"] and ln["card"]["name"] == "Meticulous Artisan" for ln in lines)

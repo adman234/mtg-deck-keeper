@@ -73,6 +73,7 @@ def job_detail(db: Session, job: ScanJob) -> dict:
         "threshold": app_settings.get(db, "vision.confidence_threshold"),
         "images": [{"id": i.id, "filename": i.filename, "width": i.width, "height": i.height,
                     "crops_found": i.crops_found, "photo_cards": i.photo_cards, "photo_error": i.photo_error,
+                    "board": i.board,
                     "unconfirmed_crops": sum(1 for d in i.detections if d.match_method == "unconfirmed"),
                     "url": f"/api/scans/{job.id}/photos/{i.id}"} for i in job.images],
         "lines": [line_out(ln, dets, job.id) for ln in job.lines],
@@ -282,6 +283,68 @@ def add_line(job_id: int, body: LineIn, db: Session = Depends(get_db), user: Use
         job.lines.append(ScanLine(card_id=card.id, raw_name=card.name, qty=body.qty or 1, board=board,
                                   confidence=1.0, flags=[], suggestions=[], detection_ids=[],
                                   accepted=True, user_edited=True))
+    db.commit()
+    return job_detail(db, job)
+
+
+class BoardIn(BaseModel):
+    board: str
+
+
+def _photo_qty(dets: list[Detection]) -> int:
+    """Cards one photo contributes to a line, counted as when the lines were built."""
+    dets = [d for d in dets if d.match_method != "unconfirmed"]
+    return max(sum(d.qty for d in dets if d.source == "photo"), sum(1 for d in dets if d.source == "crop"), 1)
+
+
+@router.put("/{job_id}/images/{image_id}/board")
+def set_photo_board(job_id: int, image_id: int, body: BoardIn, db: Session = Depends(get_db),
+                    user: User = Depends(current_user)):
+    """Move everything found in one photo to a board (say, a photo of the sideboard). A line
+    that also has cards from other photos is split, so only this photo's share moves."""
+    job = _job(db, job_id, user)
+    _editable(job)
+    img = next((i for i in job.images if i.id == image_id), None)
+    if img is None:
+        raise HTTPException(404, "Photo not found")
+    if body.board not in BOARDS:
+        raise HTTPException(400, f"Board must be one of {', '.join(sorted(BOARDS))}")
+    img.board = body.board
+    here = {d.id: d for d in img.detections}
+
+    def target(card_id: int | None, exclude: ScanLine) -> ScanLine | None:
+        if card_id is None:
+            return None  # unmatched lines are told apart only by what was read: keep them separate
+        return next((ln for ln in job.lines if ln is not exclude and ln.card_id == card_id
+                     and ln.board == body.board), None)
+
+    for line in list(job.lines):
+        mine = [i for i in line.detection_ids if i in here]
+        if not mine or line.board == body.board:
+            continue
+        if len(mine) == len(line.detection_ids):
+            into = target(line.card_id, line)
+            if into is None:
+                line.board = body.board
+            else:
+                into.qty += line.qty
+                into.detection_ids = into.detection_ids + mine
+                job.lines.remove(line)
+            continue
+        qty = min(_photo_qty([here[i] for i in mine]), line.qty - 1)
+        if qty < 1:
+            continue
+        line.qty -= qty
+        line.detection_ids = [i for i in line.detection_ids if i not in here]
+        into = target(line.card_id, line)
+        if into is None:
+            job.lines.append(ScanLine(card_id=line.card_id, raw_name=line.raw_name, qty=qty, board=body.board,
+                                      confidence=line.confidence, flags=list(line.flags),
+                                      suggestions=line.suggestions, detection_ids=mine,
+                                      accepted=line.accepted, user_edited=line.user_edited))
+        else:
+            into.qty += qty
+            into.detection_ids = into.detection_ids + mine
     db.commit()
     return job_detail(db, job)
 
