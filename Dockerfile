@@ -11,6 +11,7 @@ FROM python:3.12-slim
 
 ARG VERSION=dev
 ARG BUILD=dev
+ARG BUILD_DATE=
 LABEL org.opencontainers.image.title="MTG Deck Keeper" \
       org.opencontainers.image.description="Self-hosted MTG decklists from photos using a local vision model" \
       org.opencontainers.image.source="https://github.com/adman234/mtg-deck-keeper" \
@@ -21,6 +22,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     APP_BUILD=${BUILD} \
+    APP_BUILD_DATE=${BUILD_DATE} \
     DATA_DIR=/app/data \
     PORT=9925 \
     PUID=99 \

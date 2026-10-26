@@ -50,5 +50,6 @@ jobs:
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
             BUILD=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

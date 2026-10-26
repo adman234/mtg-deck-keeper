@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__, migrate
+from . import __version__, build_date, build_id, migrate
 from .config import get_env
 from .routes import admin_settings, auth, cards, decks, oidc, scans, users
 from .services import scanner, scryfall
@@ -39,7 +39,7 @@ def create_app(background: bool = True) -> FastAPI:
 
     @app.get("/api/health")
     def health():
-        return {"ok": True, "version": __version__}
+        return {"ok": True, "version": __version__, "build": build_id(), "built": build_date()}
 
     if (STATIC / "assets").exists():
         app.mount("/assets", StaticFiles(directory=STATIC / "assets"), name="assets")
