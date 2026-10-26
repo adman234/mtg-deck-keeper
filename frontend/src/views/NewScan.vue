@@ -6,7 +6,6 @@ import { api, session } from "../api";
 const router = useRouter();
 const files = ref([]);
 const name = ref("");
-const prepass = ref(true);
 const model = ref("");
 const error = ref("");
 const busy = ref(false);
@@ -18,7 +17,6 @@ onMounted(async () => {
     if (session.user?.is_admin) {
       const s = await api("/api/admin/settings");
       settings.value = Object.fromEntries(s.settings.map((x) => [x.key, x]));
-      prepass.value = settings.value["vision.prepass_default"].value;
     }
   } catch { /* non-admins just get defaults */ }
 });
@@ -47,7 +45,6 @@ async function submit() {
   const form = new FormData();
   files.value.forEach((f) => form.append("files", f.file, f.file.name));
   form.append("name", name.value);
-  form.append("prepass", prepass.value ? "true" : "false");
   form.append("model", model.value);
   try {
     const job = await api("/api/scans", { method: "POST", form });
@@ -81,12 +78,6 @@ async function submit() {
     <form class="panel" @submit.prevent="submit">
       <label class="field">Scan name <small>optional, becomes the default deck name</small>
         <input id="scan-name" v-model="name" type="text" placeholder="e.g. Mono-Red Aggro" maxlength="200" />
-      </label>
-      <label class="check">
-        <input id="scan-prepass" v-model="prepass" type="checkbox" />
-        <span>Find individual cards first (pre-pass)
-          <small>Cuts each card out of the photo before reading it. More accurate when cards are laid out flat and apart. The whole photo is always read as well, so fanned cards are still caught.</small>
-        </span>
       </label>
       <div class="row">
         <button class="btn primary" :disabled="!files.length || busy">{{ busy ? "Uploading…" : `Scan ${files.length || ""} photo${files.length === 1 ? "" : "s"}` }}</button>

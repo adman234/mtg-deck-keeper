@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 PAD_TOP = 0.15  # models often start the box a little below the title bar
 PAD_TOP_RETRY = 0.6  # second try when the first close-up had no title in it
 PAD_SIDE = 0.04  # keep the neighbouring pile out of the close-up
+PAD_SIDE_PILE = 0.25  # but for a pile, reach far enough sideways to see the cards fanned behind
 PAD_BOTTOM = 0.05
 OVERLAP_GUARD = 0.3
 MIN_SIDE = 0.02  # boxes thinner than this (fraction of the photo) are noise
@@ -75,18 +76,21 @@ def drop_duplicates(cards: list[vision.ReadCard]) -> tuple[list[vision.ReadCard]
     return kept, dropped
 
 
-def crop_region(img_size: tuple[int, int], bbox: list[int], top: float = PAD_TOP) -> list[int]:
+def crop_region(img_size: tuple[int, int], bbox: list[int], top: float = PAD_TOP, pile: bool = False) -> list[int]:
     """The area a close-up covers, [x, y, w, h]: extra room above (models often start the box
-    below the title bar) and little at the sides (where the neighbouring pile is)."""
+    below the title bar). Little at the sides for a single card (where the neighbouring pile is),
+    more for a pile, because models often box only its front card and miss the cards fanned out
+    behind it."""
     w, h = img_size
     x, y, bw, bh = bbox
-    x1, x2 = int(max(0, x - bw * PAD_SIDE)), int(min(w, x + bw * (1 + PAD_SIDE)))
+    side = PAD_SIDE_PILE if pile else PAD_SIDE
+    x1, x2 = int(max(0, x - bw * side)), int(min(w, x + bw * (1 + side)))
     y1, y2 = int(max(0, y - bh * top)), int(min(h, y + bh * (1 + PAD_BOTTOM)))
     return [x1, y1, x2 - x1, y2 - y1]
 
 
-def _crop(img: np.ndarray, bbox: list[int], top: float = PAD_TOP) -> np.ndarray:
-    x, y, w, h = crop_region((img.shape[1], img.shape[0]), bbox, top)
+def _crop(img: np.ndarray, bbox: list[int], top: float = PAD_TOP, pile: bool = False) -> np.ndarray:
+    x, y, w, h = crop_region((img.shape[1], img.shape[0]), bbox, top, pile)
     crop = img[y:y + h, x:x + w]
     scale = min(1.0, ZOOM_MAX_SIDE / max(crop.shape[:2]))
     if scale < 1:
@@ -100,7 +104,8 @@ async def zoom_in(img: np.ndarray, cards: list[vision.ReadCard], crop_dir: Path,
     crop_dir.mkdir(exist_ok=True)
 
     async def read(i: int, card: vision.ReadCard, top: float, suffix: str) -> vision.ZoomRead | None:
-        ok, buf = cv2.imencode(".jpg", _crop(img, card.extra["bbox"], top), [cv2.IMWRITE_JPEG_QUALITY, 90])
+        pile = card.count >= 2
+        ok, buf = cv2.imencode(".jpg", _crop(img, card.extra["bbox"], top, pile), [cv2.IMWRITE_JPEG_QUALITY, 90])
         if not ok:
             return None
         path = crop_dir / f"{stem}-pile-{i:03d}{suffix}.jpg"
@@ -109,7 +114,7 @@ async def zoom_in(img: np.ndarray, cards: list[vision.ReadCard], crop_dir: Path,
             result = await vision.read_pile(cfg, buf.tobytes())
         if result is not None and (result.name or "crop_path" not in card.extra):
             card.extra["crop_path"] = str(path)
-            card.extra["zoom_region"] = crop_region((img.shape[1], img.shape[0]), card.extra["bbox"], top)
+            card.extra["zoom_region"] = crop_region((img.shape[1], img.shape[0]), card.extra["bbox"], top, pile)
         return result
 
     async def one(i: int, card: vision.ReadCard) -> None:
@@ -134,15 +139,28 @@ class Decision:
     unsure: bool = False  # the close-up couldn't confirm the name
 
 
+def combine_counts(photo: int, zoom: int | None) -> tuple[int, bool]:
+    """Pick the pile count from the whole-table read and the close-up. Returns (count, disagree).
+
+    - Close-up says 1, whole table says more: the close-up box held only the front card and
+      couldn't see the stack, so keep the whole-table count.
+    - Otherwise when they disagree, take the lower: close-ups over-count sleeve edges and the
+      edge of the next pile, and the whole-table read leans towards 5.
+    Either way the line is flagged so the quantity gets a look.
+    """
+    if zoom is None or zoom == photo:
+        return photo, False
+    if zoom == 1 and photo >= 2:
+        return photo, True
+    return min(zoom, photo), True
+
+
 def decide(index: matching.CardIndex, card: vision.ReadCard, others: list[vision.ReadCard]) -> Decision:
     """Pick between the whole-photo read and the close-up read of one entry."""
     zoom: vision.ZoomRead | None = card.extra.get("zoom")
     if zoom is None:
         return Decision(card.name, card.count, "photo", False)
-    differs = zoom.count is not None and zoom.count != card.count
-    # When the two counts disagree, the whole-table read was right more often: close-ups tend
-    # to count sleeve edges and the edge of the next pile. Take the lower one and flag it.
-    count = min(zoom.count, card.count) if differs else card.count
+    count, differs = combine_counts(card.count, zoom.count)
     if not zoom.name:
         # The close-up couldn't see a title, so the whole-table name is unconfirmed (and is
         # where made-up names come from).

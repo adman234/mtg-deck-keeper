@@ -35,8 +35,15 @@ CARD_SCHEMA = {
     "required": ["cards"],
 }
 
+TITLE_HINT = (
+    "A card's name is the title on its TOP line, beside the mana cost. Never use the type line in the "
+    "middle of the card (Creature, Sorcery, Instant, Land, Conjuro, Criatura, Rituel, Hexerei, ...) "
+    "or any rules text as the name."
+)
+
 SYSTEM_PROMPT = (
     "You identify Magic: The Gathering cards in photos. Read each card's title line exactly as printed. "
+    + TITLE_HINT + " "
     "Use the English card name when you recognise the card; otherwise copy the printed title exactly, "
     "in its own language and script. Never invent a name you cannot read. confidence is your "
     "probability (0-1) that the name is correct. Reply with JSON only."
@@ -44,7 +51,8 @@ SYSTEM_PROMPT = (
 
 BOX_HINT = (
     '"box" is where it is in the photo: [x1, y1, x2, y2] as numbers from 0 to 1000 across the '
-    "image width and height (top-left to bottom-right)."
+    "image width and height (top-left to bottom-right). For a pile the box must cover the WHOLE pile, "
+    "including the edges of every card behind the front one, not just the front card."
 )
 FOUR_HINT = "Only if you truly can't tell 4 from 5, answer 4."
 COUNT_HINT = (
@@ -69,7 +77,7 @@ LAYOUTS = {"auto": TABLE_PROMPT, "piles": TABLE_PROMPT, "spread": TABLE_PROMPT}
 ZOOM_PROMPT = (
     "This is a close-up of one spot on a table of Magic cards: a single card or a pile of copies of "
     "one card, overlapped so the front card is on top. Read the title of the FRONT card in the middle "
-    "of the image (English name if you recognise it, otherwise as printed) and count the cards in "
+    "of the image (English name if you recognise it, otherwise as printed). " + TITLE_HINT + " Count the cards in "
     "this one pile, including the front card. " + COUNT_HINT + " Only count cards stacked under the "
     "front card; cards lying beside it belong to other piles, so ignore them and anything cut off at "
     "the edges. " + FOUR_HINT + " If no title is visible, return an empty name. "

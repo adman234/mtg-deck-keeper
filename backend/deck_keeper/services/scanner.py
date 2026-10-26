@@ -97,41 +97,19 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
         async with sem:
             return await vision.read_cards_raw(cfg, jpeg, False, layout)
 
-    tasks: list[tuple[str, str | None, list[int] | None, asyncio.Task]] = []
-    found: list[detection.FoundCard] = []
-    if prepass:
-        found = await asyncio.to_thread(detection.find_cards, img)
-        crop_dir = Path(img_row.path).parent / "crops"
-        crop_dir.mkdir(exist_ok=True)
-        for i, fc in enumerate(found):
-            crop_path = crop_dir / f"{Path(img_row.path).stem}-{i:03d}.jpg"
-            cv2.imwrite(str(crop_path), fc.image, [cv2.IMWRITE_JPEG_QUALITY, 90])
-            jpeg = _jpeg_for_model(fc.image, 800)
-            tasks.append(("crop", str(crop_path), fc.bbox, asyncio.create_task(ask(jpeg, True))))
-    # Always read the whole photo too: it catches cards the detector missed (fanned,
-    # overlapping) and gives a second opinion on counts.
+    # 1. Whole photo first. When it gives usable boxes, the close-ups re-read each card and pile.
     h, w = img.shape[:2]
     scale = min(1.0, max_side / max(h, w))
     sent = (int(w * scale), int(h * scale))
-    tasks.append(("photo", None, None, asyncio.create_task(ask_photo(_jpeg_for_model(img, max_side)))))
-
     reads: list[_Read] = []
-    errors: list[Exception] = []
     photo_cards, photo_error, debug = None, None, None
-    for source, crop_path, bbox, task in tasks:
-        try:
-            result = await task
-        except vision.VisionError as e:
-            errors.append(e)
-            if source == "photo":
-                photo_error = str(e)
-                debug = {"error": str(e)}
-                log.warning("Whole-photo read of %s failed: %s", img_row.filename, e)
-            continue
-        if source != "photo":
-            reads.extend(_Read(source, crop_path, bbox, rc) for rc in result)
-            continue
-        cards, reply = result
+    try:
+        cards, reply = await ask_photo(_jpeg_for_model(img, max_side))
+    except vision.VisionError as e:
+        photo_error = str(e)
+        debug = {"error": str(e)}
+        log.warning("Whole-photo read of %s failed: %s", img_row.filename, e)
+    else:
         box_scale = piles.place_boxes(cards, sent, (w, h))
         cards, duplicates = piles.drop_duplicates(cards)
         if zoom and box_scale:
@@ -140,8 +118,32 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
         debug = {"reply": reply, "sent_size": list(sent), "box_scale": box_scale,
                  "duplicates": [{"name": d.name, "count": d.count, "box": d.extra.get("bbox")} for d in duplicates]}
         reads.extend(_Read("photo", c.extra.get("crop_path"), c.extra.get("bbox"), c) for c in cards)
-    if errors and len(errors) == len(tasks):
-        raise errors[0]
+
+    # 2. Pre-pass only as a fallback: when the whole-photo read failed or gave no usable boxes,
+    #    nothing got a close-up, so cut cards out with OpenCV and read them one at a time.
+    has_boxes = any(r.bbox for r in reads)
+    found: list[detection.FoundCard] = []
+    if prepass and (photo_error or not has_boxes):
+        reason = "whole-photo read failed" if photo_error else "no usable boxes from the model"
+        debug = {**(debug or {}), "prepass": reason}
+        found = await asyncio.to_thread(detection.find_cards, img)
+        crop_dir = Path(img_row.path).parent / "crops"
+        crop_dir.mkdir(exist_ok=True)
+        tasks = []
+        for i, fc in enumerate(found):
+            crop_path = crop_dir / f"{Path(img_row.path).stem}-{i:03d}.jpg"
+            cv2.imwrite(str(crop_path), fc.image, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            tasks.append((str(crop_path), fc.bbox, asyncio.create_task(ask(_jpeg_for_model(fc.image, 800), True))))
+        crop_errors = []
+        for crop_path, bbox, task in tasks:
+            try:
+                reads.extend(_Read("crop", crop_path, bbox, rc) for rc in await task)
+            except vision.VisionError as e:
+                crop_errors.append(e)
+        if photo_error and (not tasks or len(crop_errors) == len(tasks)):
+            raise vision.VisionError(photo_error)
+    elif photo_error:
+        raise vision.VisionError(photo_error)
     return _ImageResult(len(found), reads, photo_cards, photo_error, debug)
 
 
@@ -318,6 +320,22 @@ async def process_job(job_id: int) -> None:
                         card = vision.ReadCard(name=choice.name, count=choice.count, confidence=conf,
                                                set=r.card.set, collector_number=r.card.collector_number)
                     res = await resolver.resolve(db, matching.get_index(db), card, r.crop_path, cfg, opts, ask)
+                    if r.source == "photo" and res.score < SURE_MATCH:
+                        # Neither read matched cleanly. Look the other name up too (the close-up may
+                        # have read the type line, the whole-table read a foreign title) and keep
+                        # whichever finds a card more convincingly.
+                        zoom = r.card.extra.get("zoom")
+                        other = r.card.name if choice.used == "zoom" else (zoom.name if zoom else "")
+                        if other and other.casefold() != card.name.casefold():
+                            alt = vision.ReadCard(name=other, count=card.count, confidence=card.confidence,
+                                                  set=r.card.set, collector_number=r.card.collector_number)
+                            alt_res = await resolver.resolve(db, matching.get_index(db), alt, None, cfg, opts, ask)
+                            raw["both_names"] = {"kept": card.name, "other": other,
+                                                 "scores": [res.score, alt_res.score]}
+                            if alt_res.card_id and alt_res.score > res.score:
+                                card, res = alt, alt_res
+                                raw["both_names"]["kept"] = other
+                                raw["used"] = "photo" if choice.used == "zoom" else "zoom"
                     img.detections.append(Detection(
                         source=r.source, crop_path=r.crop_path, bbox=r.bbox,
                         raw_name=card.name[:255], raw_set=(r.card.set or "")[:20] or None,

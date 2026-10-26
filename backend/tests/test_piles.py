@@ -96,10 +96,12 @@ def test_scan_zooms_into_piles(admin):
     assert img["duplicates"][0]["name"] == "Lightnin Mage"
     det = img["detections"][0]
     assert det["raw"]["photo"]["count"] == 5 and det["raw"]["zoom"]["count"] == 4
-    # The close-up area is the model's box plus more room above than at the sides
+    # The close-up area is the model's box plus room above, and for a pile (5 here) a quarter of
+    # the box width on each side so the cards fanned out behind the front one are in view
     zx, zy, zw, zh = det["raw"]["zoom_region"]
     bx, by, bw, bh = det["bbox"]
-    assert zx <= bx and zy < by and zx + zw >= bx + bw and (by - zy) > (bx - zx)
+    assert zy < by and zx + zw >= bx + bw
+    assert bx - zx == int(bw * piles.PAD_SIDE_PILE) or zx == 0
     dl = admin.get(f"/api/scans/{job_id}/debug", params={"download": "true"})
     assert "attachment" in dl.headers["content-disposition"]
 
@@ -207,3 +209,108 @@ def test_scan_8_regression_made_up_row_names_fixed_by_close_ups(admin):
     asyncio.run(scanner.process_job(job_id))
     lines = admin.get(f"/api/scans/{job_id}").json()["lines"]
     assert [(ln["card"]["name"], ln["qty"]) for ln in lines] == [("Counterspell", 4)]
+
+
+def test_combine_counts():
+    assert piles.combine_counts(4, 4) == (4, False)
+    assert piles.combine_counts(5, 1) == (5, True)  # close-up only saw the front card
+    assert piles.combine_counts(2, 4) == (2, True)  # close-up over-counted sleeves / next pile
+    assert piles.combine_counts(4, 3) == (3, True)
+    assert piles.combine_counts(1, 1) == (1, False)
+    assert piles.combine_counts(3, None) == (3, False)
+
+
+def test_single_card_close_up_stays_narrow_and_pile_reaches_sideways():
+    single = piles.crop_region((2400, 1800), [1000, 500, 300, 400], pile=False)
+    pile = piles.crop_region((2400, 1800), [1000, 500, 300, 400], pile=True)
+    assert single[0] == 1000 - int(300 * piles.PAD_SIDE) and pile[0] == 1000 - int(300 * piles.PAD_SIDE_PILE)
+    assert pile[2] > single[2] and pile[1] == single[1]
+
+
+def test_prompts_say_title_is_the_top_line_and_box_the_whole_pile():
+    for prompt in (vision.ZOOM_PROMPT, vision.SYSTEM_PROMPT):
+        assert "TOP line" in prompt and "type line" in prompt and "Conjuro" in prompt
+    assert "WHOLE pile" in vision.TABLE_PROMPT
+
+
+def test_close_up_reading_the_type_line_loses_to_the_foreign_title(admin):
+    """Scan 11: the close-up read "Conjuro" (Spanish for Sorcery), which fuzzy-matched Conquer;
+    the whole-table read "Vislumbrar en la naturaleza" is Glimpse of Nature in Spanish."""
+    from deck_keeper.db import session_scope
+    from deck_keeper.models import Card
+    with session_scope() as db:
+        db.add_all([Card(name="Glimpse of Nature"), Card(name="Conquer")])
+    with session_scope() as db:
+        matching.rebuild(db)
+
+    def model(request):
+        text = json.loads(request.content)["messages"][-1]["content"][0]["text"]
+        if "close-up" in text:
+            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(
+                {"name": "Conjuro", "count": 1, "confidence": 1.0})}}]})
+        if "Which of these" in text:  # candidate re-ask: the model happily picks one
+            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(
+                {"name": "Conquer", "confidence": 0.9})}}]})
+        return chat_reply([{"name": "Vislumbrar en la naturaleza", "count": 4, "confidence": 1,
+                            "box": [130, 160, 250, 420]}])
+
+    def scry(request):
+        if request.url.path == "/cards/search" and "naturaleza" in request.url.params["q"] and \
+                not request.url.params["q"].startswith('"'):
+            return httpx.Response(200, json={"data": [
+                {"name": "Glimpse of Nature", "printed_name": "Vislumbrar la naturaleza", "lang": "es"}]})
+        return httpx.Response(404, json={})
+
+    vision.transport = httpx.MockTransport(model)
+    scryfall.transport = httpx.MockTransport(scry)
+    admin.put("/api/admin/settings", json={"values": {"vision.model": "daily"}})
+    job_id = admin.post("/api/scans", files=[("files", ("a.jpg", _table_jpeg([(300, 300)]), "image/jpeg"))]).json()["id"]
+    asyncio.run(scanner.process_job(job_id))
+    [line] = admin.get(f"/api/scans/{job_id}").json()["lines"]
+    assert (line["card"]["name"], line["qty"]) == ("Glimpse of Nature", 4)  # close-up's 1 = front card only
+    raw = admin.get(f"/api/scans/{job_id}/debug").json()["images"][0]["detections"][0]["raw"]
+    assert raw["both_names"]["kept"] == "Vislumbrar en la naturaleza"
+
+
+def _count_prompts(seen):
+    def model(request):
+        text = json.loads(request.content)["messages"][-1]["content"][0]["text"]
+        kind = "crop" if "single Magic card" in text else "zoom" if "close-up" in text else "photo"
+        seen.append(kind)
+        if kind == "crop":
+            return chat_reply([{"name": "Shock", "count": 1, "confidence": 0.95}])
+        if kind == "zoom":
+            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(
+                {"name": "Shock", "count": 1, "confidence": 0.95})}}]})
+        return seen.photo_reply
+    return model
+
+
+class _Seen(list):
+    photo_reply = None
+
+
+def test_pre_pass_skipped_when_the_model_gives_boxes(admin):
+    seen = _Seen()
+    seen.photo_reply = chat_reply([{"name": "Shock", "count": 1, "confidence": 0.9, "box": [130, 160, 250, 420]}])
+    vision.transport = httpx.MockTransport(_count_prompts(seen))
+    scryfall.transport = httpx.MockTransport(lambda r: httpx.Response(404, json={}))
+    admin.put("/api/admin/settings", json={"values": {"vision.model": "daily"}})
+    job_id = admin.post("/api/scans", files=[("files", ("a.jpg", _table_jpeg([(300, 300), (700, 300)]), "image/jpeg"))]).json()["id"]
+    asyncio.run(scanner.process_job(job_id))
+    assert "crop" not in seen and seen.count("zoom") == 1
+    raw = admin.get(f"/api/scans/{job_id}/debug").json()["images"][0]
+    assert raw["crops_found"] == 0 and "prepass" not in raw
+
+
+def test_pre_pass_runs_when_the_model_gives_no_boxes(admin):
+    seen = _Seen()
+    seen.photo_reply = chat_reply([{"name": "Shock", "count": 2, "confidence": 0.9}])
+    vision.transport = httpx.MockTransport(_count_prompts(seen))
+    scryfall.transport = httpx.MockTransport(lambda r: httpx.Response(404, json={}))
+    admin.put("/api/admin/settings", json={"values": {"vision.model": "daily"}})
+    job_id = admin.post("/api/scans", files=[("files", ("a.jpg", _table_jpeg([(300, 300), (700, 300)]), "image/jpeg"))]).json()["id"]
+    asyncio.run(scanner.process_job(job_id))
+    assert seen.count("crop") == 2
+    raw = admin.get(f"/api/scans/{job_id}/debug").json()["images"][0]
+    assert raw["crops_found"] == 2 and raw["prepass"] == "no usable boxes from the model"

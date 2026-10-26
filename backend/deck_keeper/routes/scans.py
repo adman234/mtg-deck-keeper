@@ -89,7 +89,7 @@ def list_scans(db: Session = Depends(get_db), user: User = Depends(current_user)
 async def create_scan(
     files: list[UploadFile] = File(...),
     name: str = Form(""),
-    prepass: bool = Form(True),
+    prepass: bool | None = Form(None),  # default: the fallback setting
     layout: str = Form("auto"),
     model: str = Form(""),
     db: Session = Depends(get_db),
@@ -103,6 +103,8 @@ async def create_scan(
         raise HTTPException(400, f"Layout must be one of {', '.join(LAYOUTS)}")
     if len(files) > MAX_PHOTOS:
         raise HTTPException(400, f"Upload at most {MAX_PHOTOS} photos per scan")
+    if prepass is None:
+        prepass = app_settings.get(db, "vision.prepass_default")
     job = ScanJob(user_id=user.id, name=name.strip()[:200], prepass=prepass, layout=layout, model=model.strip(),
                   total_images=len(files))
     db.add(job)
@@ -140,8 +142,7 @@ def rerun(job_id: int, body: RerunIn, db: Session = Depends(get_db), user: User 
     job = _job(db, job_id, user)
     if job.status in ("queued", "processing"):
         raise HTTPException(409, "This scan is already running")
-    if body.prepass is not None:
-        job.prepass = body.prepass
+    job.prepass = body.prepass if body.prepass is not None else app_settings.get(db, "vision.prepass_default")
     if body.layout is not None:
         if body.layout not in LAYOUTS:
             raise HTTPException(400, f"Layout must be one of {', '.join(LAYOUTS)}")

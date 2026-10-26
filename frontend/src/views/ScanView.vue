@@ -57,8 +57,8 @@ function addCard(card) {
   act(() => api(`/api/scans/${props.id}/lines`, { method: "POST", body: { card_id: card.id, qty: addQty.value, board: addBoard.value } }));
   addQty.value = 1;
 }
-async function rerun(prepass) {
-  await act(() => api(`/api/scans/${props.id}/rerun`, { method: "POST", body: { prepass, layout: "auto" } }));
+async function rerun() {
+  await act(() => api(`/api/scans/${props.id}/rerun`, { method: "POST", body: { layout: "auto" } }));
   load();
 }
 async function del() {
@@ -131,6 +131,7 @@ const boxStyle = (b, img) => ({
   left: (b.bbox[0] / img.width) * 100 + "%", top: (b.bbox[1] / img.height) * 100 + "%",
   width: (b.bbox[2] / img.width) * 100 + "%", height: (b.bbox[3] / img.height) * 100 + "%",
 });
+const cutOuts = computed(() => (scan.value?.images || []).some((img) => img.crops_found));
 const failedPhotos = computed(() => (scan.value?.images || [])
   .map((img, i) => ({ n: i + 1, error: img.photo_error }))
   .filter((p) => p.error));
@@ -143,15 +144,14 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
       <div>
         <p class="sub"><RouterLink to="/scans">Scans</RouterLink> / #{{ scan.id }}</p>
         <h1>{{ scan.name || `Scan #${scan.id}` }}</h1>
-        <p class="sub">{{ scan.total_images }} photo{{ scan.total_images === 1 ? "" : "s" }} · {{ scan.model || "default model" }} · pre-pass {{ scan.prepass ? "on" : "off" }} · {{ fmtDate(scan.created_at) }}</p>
+        <p class="sub">{{ scan.total_images }} photo{{ scan.total_images === 1 ? "" : "s" }} · {{ scan.model || "default model" }}<span v-if="cutOuts"> · cut-outs used as fallback</span> · {{ fmtDate(scan.created_at) }}</p>
       </div>
       <template v-if="!['queued', 'processing'].includes(scan.status)">
         <details class="rerun">
           <summary class="btn small">Read again</summary>
           <div class="menu">
-            <button class="btn small" @click="rerun(true)">With card pre-pass</button>
-            <button class="btn small" @click="rerun(false)">Whole photos only</button>
-            <p class="sub" style="font-size:0.8rem">Replaces the current review list.</p>
+            <p class="sub" style="font-size:0.8rem">Reads the photos again with the current settings and replaces this review list.</p>
+            <button class="btn small primary" @click="rerun()">Read again</button>
           </div>
         </details>
         <button class="btn small" @click="toggleRaw">{{ raw ? "Hide raw data" : "Raw data" }}</button>
@@ -336,7 +336,7 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
             <button class="photo" @click="zoom = img.url"><img :src="img.url" :alt="`Photo ${i + 1}`" loading="lazy" /></button>
             <figcaption class="sub small">
               Photo {{ i + 1 }}
-              <span v-if="scan.prepass"> · {{ img.crops_found }} cut out</span>
+              <span v-if="img.crops_found"> · {{ img.crops_found }} cut out (fallback)</span>
               <span v-if="img.photo_cards != null"> · {{ img.photo_cards }} listed from whole photo</span>
               <span v-if="img.photo_error" class="warn-text"> · whole-photo read failed</span>
               <span v-if="img.unconfirmed_crops"> · {{ img.unconfirmed_crops }} unreadable cut-out{{ img.unconfirmed_crops === 1 ? "" : "s" }} ignored</span>

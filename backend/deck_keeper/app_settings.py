@@ -48,8 +48,9 @@ SPECS: list[Spec] = [
          "Match llama-server's --parallel value."),
     Spec("vision.confidence_threshold", "VISION_CONFIDENCE_THRESHOLD", float, 0.80, "Review threshold", "vision",
          "Lines below this confidence are flagged for review (0–1)."),
-    Spec("vision.prepass_default", "CARD_DETECTION_DEFAULT", bool, True, "Card detection pre-pass on by default",
-         "vision", "Crop individual cards with OpenCV before asking the model. Users can untick it per scan."),
+    Spec("vision.prepass_default", "CARD_DETECTION_DEFAULT", bool, True, "Cut out cards when the model gives no boxes",
+         "vision", "Fallback: if a photo's whole-table read fails or gives no card positions, find cards with "
+         "OpenCV and read them one at a time. Not used when the model gives boxes (close-ups do that job)."),
     Spec("vision.disable_thinking", "VISION_DISABLE_THINKING", bool, True, "Turn off model thinking", "vision",
          "Asks thinking models (Qwen3 and similar) to answer directly. Faster, and stops empty replies "
          "when reasoning uses up the reply budget."),
