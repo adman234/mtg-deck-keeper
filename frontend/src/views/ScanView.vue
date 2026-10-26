@@ -162,7 +162,6 @@ const expectedTotals = computed(() => {
 });
 const needsCommander = computed(() => deckType.value.value === "100" && !lines.value.some((l) => l.board === "commander"));
 const setDeckType = (value) => act(() => api(`/api/scans/${props.id}/deck-type`, { method: "PUT", body: { deck_type: value } }));
-const toggleCommander = (l) => patch(l, { board: l.board === "commander" ? "main" : "commander" });
 
 // Every title cut-out behind a line (a basic land found ten times has ten).
 const expanded = ref(new Set());
@@ -347,7 +346,7 @@ const titleCrop = (l) => l.sources.find((s) => s.title_url && s.title_exact)?.ti
                 :title="t.have === t.want ? 'Adds up' : `Expected ${t.want}`">
             {{ t.label }} <span class="num">{{ t.have }} / {{ t.want }}</span>
           </span>
-          <span v-if="needsCommander" class="sub small warn-text">Mark your commander with its “Commander” button.</span>
+          <span v-if="needsCommander" class="sub small warn-text">Set your commander's board to “Commander”.</span>
         </div>
         <div class="row">
           <label class="sort sub small">Sort
@@ -452,11 +451,6 @@ const titleCrop = (l) => l.sources.find((s) => s.title_url && s.title_exact)?.ti
           </select>
 
           <div class="actions">
-            <button v-if="isCommanderDeck && l.card" class="btn small" :class="{ primary: l.board === 'commander' }"
-                    @click="toggleCommander(l)" :aria-pressed="l.board === 'commander'"
-                    :title="l.board === 'commander' ? 'Move back to the main deck' : 'Make this your commander'">
-              ★ Commander
-            </button>
             <button v-if="l.needs_review && l.card && !unsure(l)" class="btn small primary" @click="patch(l, { accepted: true })">Looks right</button>
             <button class="btn small danger" @click="removeLine(l)" :aria-label="`Remove ${l.card?.name || l.raw_name}`">Remove</button>
           </div>

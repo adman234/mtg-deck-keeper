@@ -53,3 +53,21 @@ def test_the_name_box_sits_on_the_title_bar():
     assert y <= min(ys) <= y + 0.09 * h and y + 0.06 * h <= max(ys) <= y + 0.15 * h
     strip = titles.cut(img, quad)
     assert strip.shape[0] == 72 and strip.shape[1] > 400
+
+
+def test_a_strip_title_box_is_tight_and_level_on_a_turned_card():
+    """A card in a column lying a little turned, and the strip placed a little to one side: the
+    name box still sits exactly on the title bar, along it."""
+    rng = np.random.default_rng(5)
+    img = np.full((900, 900, 3), (120, 70, 40), np.uint8)
+    c = card(rng, 250, 349)
+    x0, y0 = 320, 250
+    img[y0:y0 + 349, x0:x0 + 250] = c
+    M = cv2.getRotationMatrix2D((x0 + 125, y0 + 175), -4, 1.0)  # turned 4 degrees
+    img = cv2.warpAffine(img, M, (900, 900), borderMode=cv2.BORDER_REPLICATE)
+    rot = lambda pts: (np.hstack([np.float32(pts), np.ones((len(pts), 1), np.float32)]) @ M.T)
+    bar = rot([[x0 + 20, y0 + 20], [x0 + 229, y0 + 20], [x0 + 229, y0 + 44], [x0 + 20, y0 + 44]])
+    # The strip as the column walk might give it: unturned, 30 px right, down to where the next card lies.
+    strip = [[x0 + 30, y0], [x0 + 280, y0], [x0 + 280, y0 + 60], [x0 + 30, y0 + 60]]
+    quad, _ = titles.in_strip(img, strip)
+    assert np.abs(np.float32(quad) - bar).max() < 6, (quad, bar.round())

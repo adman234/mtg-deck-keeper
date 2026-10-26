@@ -52,6 +52,12 @@ def test_score():
     assert s["missing"] == [["Forest", 2], ["Titania", 1]] and s["extra"] == [["Gate's Crackle", 1], ["Sol Ring", 1]]
 
 
+def test_score_counts_either_face_of_a_two_faced_card():
+    expected = [{"name": "Naktamun Lorespinner // Wheel of Fortune", "qty": 1}]
+    s = decklists.score(expected, [{"name": "Wheel of Fortune", "qty": 1}])
+    assert s["right"] == 1 and s["extra"] == []
+
+
 def test_scan_scored_against_the_real_list_on_every_read(admin):
     admin.put("/api/admin/settings", json={"values": {"vision.model": "daily"}})
     vision.transport = httpx.MockTransport(lambda r: chat_reply([

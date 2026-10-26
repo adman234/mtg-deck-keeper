@@ -236,8 +236,31 @@ def test_many_title_bars_in_columns_skip_the_whole_photo_read(admin):
     vision.transport = httpx.MockTransport(model)
     scryfall.transport = httpx.MockTransport(lambda r: httpx.Response(404, json={}))
     admin.put("/api/admin/settings", json={"values": {"vision.model": "daily"}})
-    job_id = admin.post("/api/scans", files=[("files", ("a.jpg", jpeg, "image/jpeg"))]).json()["id"]
-    asyncio.run(scanner.process_job(job_id))
-    raw = admin.get(f"/api/scans/{job_id}/debug").json()["images"][0]
-    assert "whole" not in prompts and "tile" in prompts
+
+    def scan():
+        prompts.clear()
+        job_id = admin.post("/api/scans", files=[("files", ("a.jpg", jpeg, "image/jpeg"))]).json()["id"]
+        asyncio.run(scanner.process_job(job_id))
+        return admin.get(f"/api/scans/{job_id}").json(), admin.get(f"/api/scans/{job_id}/debug").json()["images"][0]
+
+    # By default the titles in the columns and the outlined front card are all that's read.
+    detail, raw = scan()
+    assert "whole" not in prompts and "tile" not in prompts
     assert raw["whole_photo"].startswith("skipped") and raw["columns"][0]["strips"] == n - 1
+    assert sum(ln["qty"] for ln in detail["lines"]) == n  # the front card got its close-up
+
+    # The setting reads the photo in tiles as well, for cards outside the columns.
+    admin.put("/api/admin/settings", json={"values": {"vision.tiles_with_columns": True}})
+    detail, raw = scan()
+    assert "whole" not in prompts and "tile" in prompts
+
+
+def test_entry_next_to_a_strip_reading_the_same_name_is_one_card():
+    """Scan 19: the tile listed the card behind each front card with its box over the front
+    card's title, and the strip read it too."""
+    strip = vision.ReadCard(name="Siege-Gang Commander", count=1, confidence=0.9, extra={"bbox": [1478, 1738, 446, 128]})
+    tile = _card("Siege-Gang Commander", [1388, 1880, 519, 203])
+    other = _card("Forgotten Cave", [1388, 1880, 519, 203])
+    assert scanner._read_by_strip(tile, [strip], 675)
+    assert not scanner._read_by_strip(other, [strip], 675)
+    assert not scanner._read_by_strip(_card("Siege-Gang Commander", [1388, 2600, 519, 203]), [strip], 675)

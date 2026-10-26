@@ -98,7 +98,8 @@ class _ImageResult:
 
 async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionConfig,
                          sem: asyncio.Semaphore, max_side: int, layout: str = "piles",
-                         zoom: bool = True, index: matching.CardIndex | None = None) -> _ImageResult:
+                         zoom: bool = True, index: matching.CardIndex | None = None,
+                         tiles_with_columns: bool = False) -> _ImageResult:
     img = await asyncio.to_thread(cv2.imread, img_row.path)
     if img is None:
         raise vision.VisionError(f"Could not open {img_row.filename}")
@@ -150,9 +151,14 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
 
     if in_columns >= tiles.CASCADE_TILES:
         debug["whole_photo"] = f"skipped: {in_columns} title bars found in cascading columns"
-        tiled, tile_debug = await tiles.read(img, cfg, sem, max_side, None, (card_w, card_h))
-        debug["tiled"], debug["tiles"] = "cascading columns found", tile_debug
-        cards, box_scale = tiled, "tiles"
+        if tiles_with_columns:
+            tiled, tile_debug = await tiles.read(img, cfg, sem, max_side, None, (card_w, card_h))
+            debug["tiled"], debug["tiles"] = "cascading columns found", tile_debug
+            cards, box_scale = tiled, "tiles"
+        else:
+            # Every title in the columns is read on its own and every outlined card gets a close-up:
+            # reading tiles as well took 150 of 240 s and found one more card (scan 19).
+            cards, box_scale = [], "columns"
     else:
         # 2. Whole photo. When it gives usable boxes, the close-ups re-read each card and pile.
         progress.stage("Reading the whole photo")
@@ -187,7 +193,8 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
         strips = [c for c in strips if c.name]
         covered = [np.float32(c.extra["strip"]["corners"]) for c in strips]
         before = len(cards)
-        cards = [c for c in cards if not _inside_any(c.extra.get("bbox"), covered)]
+        cards = [c for c in cards if not _inside_any(c.extra.get("bbox"), covered)
+                 and not _read_by_strip(c, strips, card_h)]
         debug.update(columns=[{"front": outlines[col.front].bbox, "strips": len(col.strips)} for col in columns],
                      replaced_by_strips=before - len(cards))
 
@@ -285,9 +292,10 @@ def _title_boxes(img: np.ndarray, cards: list[vision.ReadCard], card_h: float | 
     crop_dir.mkdir(exist_ok=True)
     for i, c in enumerate(cards):
         if c.extra.get("strip"):
-            quad, exact = c.extra["strip"].get("title"), True
+            found = titles.in_strip(img, c.extra["strip"]["corners"])
+            quad, exact = (found[0], True) if found else (c.extra["strip"].get("title"), False)
         elif c.extra.get("corners"):
-            quad, _ = titles.for_card(img, c.extra["corners"])
+            quad, _ = titles.for_outlined(img, c.extra["corners"])
             exact = True
         elif c.extra.get("bbox"):
             quad, exact = titles.band_of_box(c.extra["bbox"], card_h), False
@@ -298,6 +306,23 @@ def _title_boxes(img: np.ndarray, cards: list[vision.ReadCard], card_h: float | 
         path = crop_dir / f"{stem}-title-{i:03d}.jpg"
         cv2.imwrite(str(path), titles.cut(img, quad), [cv2.IMWRITE_JPEG_QUALITY, 92])
         c.extra.update(title_quad=[[round(v, 1) for v in pt] for pt in quad], title_crop=str(path), title_exact=exact)
+
+
+def _read_by_strip(card: vision.ReadCard, strips: list[vision.ReadCard], card_h: float | None) -> bool:
+    """Whether a title strip just above or below an entry read the same name: the same card, its
+    box drawn a little off the strip (scan 19: the card right behind each front card was listed
+    by both, the tile's box sitting over the front card's title)."""
+    box = card.extra.get("bbox")
+    if not box or not card_h or card.count != 1:
+        return False
+    key = matching.normalize(card.name)
+    for s in strips:
+        sb = s.extra["bbox"]
+        overlap = min(box[0] + box[2], sb[0] + sb[2]) - max(box[0], sb[0])
+        if (matching.normalize(s.name) == key and overlap > 0.5 * min(box[2], sb[2])
+                and abs((box[1] + box[3] / 2) - (sb[1] + sb[3] / 2)) < card_h * SAME_CARD_REACH):
+            return True
+    return False
 
 
 def _inside_any(bbox: list[int] | None, quads: list[np.ndarray]) -> bool:
@@ -348,6 +373,7 @@ def _unconfirmed(det: Detection, photo_card_ids: set[int]) -> bool:
 
 
 SURE_MATCH = 85.0  # below this the "match" is only the nearest spelling
+SAME_CARD_REACH = 0.5  # of a card's height: an entry and a strip this close, reading the same name, are one card
 ACCEPT_MATCH = 80.0  # below this it isn't taken at all ("Force of One" is not Forest)
 
 # Constructed decks allow at most 4 copies of a card, except basic lands and cards that
@@ -529,7 +555,8 @@ async def process_job(job_id: int) -> None:
                 progress.photo(n)
                 db.commit()
                 result = await _process_image(img, job.prepass, cfg, sem, vs["image_max_side"], job.layout,
-                                              vs["pile_zoom"], matching.get_index(db))
+                                              vs["pile_zoom"], matching.get_index(db),
+                                              vs["tiles_with_columns"])
                 img.crops_found, img.photo_cards, img.photo_error = result.crops, result.photo_cards, result.photo_error
                 img.debug = result.debug
                 reads = result.reads

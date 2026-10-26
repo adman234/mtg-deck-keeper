@@ -63,9 +63,13 @@ def score(expected: list[dict], lines: list[dict]) -> dict:
     for e in expected:
         name = e.get("card_name") or e["name"]
         want.setdefault(matching.normalize(name), [name, 0])[1] += e["qty"]
+    # A two-faced card in the list counts when either face's name was found.
+    faces = {matching.normalize(f): k for k, (n, _) in want.items() if "//" in n for f in n.split("//")}
     got: dict[str, list] = {}
     for ln in lines:
-        got.setdefault(matching.normalize(ln["name"]), [ln["name"], 0])[1] += ln["qty"]
+        key = matching.normalize(ln["name"])
+        key = key if key in want else faces.get(key, key)
+        got.setdefault(key, [ln["name"], 0])[1] += ln["qty"]
     right = sum(min(q, got.get(k, [None, 0])[1]) for k, (_, q) in want.items())
     missing = sorted(([n, q - got.get(k, [None, 0])[1]] for k, (n, q) in want.items()
                       if q > got.get(k, [None, 0])[1]), key=lambda x: x[0])

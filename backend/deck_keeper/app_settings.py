@@ -66,6 +66,9 @@ SPECS: list[Spec] = [
     Spec("vision.pile_zoom", "PILE_ZOOM", bool, True, "Zoom in on each pile", "vision",
          "Ask the model where each card or pile is, then re-read each one from a close-up to get the "
          "count and name right. One extra model call per pile; needs a model that can give boxes."),
+    Spec("vision.tiles_with_columns", "TILES_WITH_COLUMNS", bool, False, "Also read cascades in tiles", "vision",
+         "When a photo is mostly cascading columns, every title in them is read on its own. Also reading "
+         "the photo in tiles can find a card lying outside the columns, but takes about twice as long."),
     Spec("vision.image_max_side", "VISION_IMAGE_MAX_SIDE", int, 1600, "Max image size sent (px)", "vision"),
     # Login / OIDC (names match Mealie)
     Spec("auth.password_login", "ALLOW_PASSWORD_LOGIN", bool, True, "Allow username/password login", "auth",

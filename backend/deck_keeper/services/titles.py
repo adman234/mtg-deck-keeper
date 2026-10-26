@@ -110,6 +110,15 @@ def for_card(img: np.ndarray, corners) -> tuple[list[list[float]], float]:
     return quad.round(1).tolist(), bar.score
 
 
+def for_outlined(img: np.ndarray, corners) -> tuple[list[list[float]], float]:
+    """The title bar of a card outlined whole: looked for like a strip's (levelled, tight), in the
+    card's top part, or else as for_card does."""
+    _, src, _, _ = _upright(corners)
+    tl, tr, br, bl = src
+    found = in_strip(img, [tl, tr, tr + (br - tr) * TOP_PART, tl + (bl - tl) * TOP_PART])
+    return found if found else for_card(img, corners)
+
+
 def band_of_box(box: list[int], card_h: float | None) -> list[list[float]]:
     """Where the title should be in an upright box the model drew around a card (approximate)."""
     x, y, w, h = box
@@ -127,3 +136,130 @@ def cut(img: np.ndarray, quad, height: int = 72) -> np.ndarray:
     out_w = max(height, int(height * w / h))
     dst = np.float32([[0, 0], [out_w, 0], [out_w, height], [0, height]])
     return cv2.warpPerspective(img, cv2.getPerspectiveTransform(src, dst), (out_w, height), flags=cv2.INTER_CUBIC)
+
+
+STRIP_W = 600  # a strip is straightened with its card this many pixels wide to look for the bar
+STRIP_SIDE = 0.45  # ...reaching this far (of a card width) past either side, since its place across is rough
+MAX_TILT = 8.0  # degrees: a card behind may lie turned this much from the one in front
+TOP_PART = 0.17  # of a whole card's height: where to look for its title bar
+BAR_STRIP_H = (0.04, 0.08)  # a title bar's height, in card heights
+BAR_STRIP_W = (0.75, 0.97)  # its width, in card widths
+
+
+def _tilt(gray: np.ndarray, min_len: float) -> float:
+    """The angle of the long straight edges running across an image (card tops, title bar
+    borders), in degrees: what to turn it by to level them."""
+    edges = cv2.Canny(cv2.GaussianBlur(gray, (3, 3), 0), 50, 150)
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 720, threshold=int(min_len * 0.5), minLineLength=int(min_len),
+                            maxLineGap=8)
+    if lines is None:
+        return 0.0
+    angles, weights = [], []
+    for x1, y1, x2, y2 in lines.reshape(-1, 4):
+        a = float(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
+        if abs(a) <= MAX_TILT:
+            angles.append(a)
+            weights.append(float(np.hypot(x2 - x1, y2 - y1)))
+    if not angles:
+        return 0.0
+    order = np.argsort(angles)
+    cum = np.cumsum(np.array(weights)[order])
+    return float(np.array(angles)[order][np.searchsorted(cum, cum[-1] / 2)])  # length-weighted median
+
+
+def _runs(on: np.ndarray, gap: int) -> list[tuple[int, int]]:
+    """Runs of True in a 1-D mask, bridging gaps up to `gap` long: [(start, end)]."""
+    out: list[tuple[int, int]] = []
+    for i in np.flatnonzero(on):
+        if out and i - out[-1][1] <= gap:
+            out[-1] = (out[-1][0], int(i))
+        else:
+            out.append((int(i), int(i)))
+    return out
+
+
+def _bar_in_strip(level: np.ndarray, card_h: float, want_y: float) -> Bar | None:
+    """The title bar in a levelled strip (card STRIP_W pixels wide): two rows of strong
+    horizontal edges, a bar's height apart, near where the bar should be; its ends are where the
+    top border stops. When the card in front hides the bar's bottom border, the strip's bottom
+    edge stands in for it."""
+    H, W = level.shape
+    g = cv2.GaussianBlur(level, (3, 3), 0).astype(np.float32)
+    gy = np.abs(cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3))
+    mid = gy[:, int(W * 0.5 - STRIP_W * 0.3):int(W * 0.5 + STRIP_W * 0.3)]
+    rows = np.convolve(np.median(mid, axis=1) + mid.mean(axis=1), np.ones(3) / 3, "same")
+    if rows.max() <= 0:
+        return None
+    rows = rows / rows.max()
+    lo_h, hi_h = int(BAR_STRIP_H[0] * card_h), int(BAR_STRIP_H[1] * card_h)
+    best = None
+    for y1 in range(1, min(H - 4, int(want_y + 0.06 * card_h))):
+        if rows[y1] < 0.25 or rows[y1] < rows[y1 - 1] or rows[y1] < rows[y1 + 1]:
+            continue
+        for y2 in range(y1 + lo_h, min(H, y1 + hi_h + 1)):
+            if not (y2 >= H - 2 or (rows[y2] >= 0.25 and rows[y2] >= rows[y2 - 1] and rows[y2] >= rows[min(H - 1, y2 + 1)])):
+                continue
+            hidden = y2 >= H - 2
+            score = rows[y1] + (0.3 if hidden else rows[y2]) - abs(y1 - want_y) / card_h
+            if best is None or score > best[0]:
+                best = (score, y1, y2)
+    if best is None:
+        return None
+    _, y1, y2 = best
+    # Across: the bar's ends. Its borders run unbroken from one end to the other and stop there,
+    # and each end is an upright edge the bar's full height.
+    border = gy[max(0, y1 - 2):y1 + 3].max(axis=0)
+    if y2 < H - 2:
+        border = np.minimum(border, gy[max(0, y2 - 2):y2 + 3].max(axis=0)) * 0.5 + border * 0.5
+    on = (border > 0.35 * max(1.0, float(np.percentile(border, 95)))).astype(np.float32)
+    gx = np.abs(cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3))[y1 + 2:max(y1 + 3, y2 - 1)]
+    ends = np.convolve(np.median(gx, axis=0), np.ones(3) / 3, "same")
+    ends = ends / max(1.0, float(ends.max()))
+    cum = np.concatenate([[0.0], np.cumsum(on)])
+    edge = int(STRIP_W * 0.04)
+    best_x = None
+    for w in range(int(BAR_STRIP_W[0] * STRIP_W), min(W, int(BAR_STRIP_W[1] * STRIP_W)), 3):
+        for x1 in range(edge, W - w - edge, 2):
+            x2 = x1 + w
+            inside = (cum[x2] - cum[x1]) / w
+            outside = ((cum[x1] - cum[x1 - edge]) + (cum[x2 + edge] - cum[x2])) / (2 * edge)
+            score = inside - 0.6 * outside + 0.4 * (ends[x1] + ends[x2]) + 0.15 * w / STRIP_W
+            if best_x is None or score > best_x[0]:
+                best_x = (score, x1, x2)
+    if best_x is None or best_x[0] < 0.5:
+        return None
+    _, x1, x2 = best_x
+    return Bar(x1, y1, x2, y2, round(float(best[0]), 2))
+
+
+def in_strip(img: np.ndarray, corners) -> tuple[list[list[float]], float] | None:
+    """The title bar of a card in a title strip of a cascade (strip corners in img: the card's
+    top edge down to the next card's), as a quad in img and how sure; None when no bar is found.
+    The strip is straightened, levelled by its long edges (a card behind may lie a little turned)
+    and searched for the bar's two borders, so the box sits tightly and level on the name."""
+    tl, tr, br, bl = (np.float32(p) for p in corners)
+    across = (tr - tl) / max(float(np.linalg.norm(tr - tl)), 1.0)
+    card_w = float(np.linalg.norm(tr - tl))
+    scale = STRIP_W / max(card_w, 1.0)
+    strip_h = float(np.linalg.norm(bl - tl))
+    side = across * card_w * STRIP_SIDE
+    up = (tl - bl) / max(strip_h, 1.0) * card_w * 0.03  # a little above the card's top edge too
+    src = np.float32([tl - side + up, tr + side + up, br + side, bl - side])
+    W = int(STRIP_W * (1 + 2 * STRIP_SIDE))
+    H = max(16, int((strip_h + card_w * 0.03) * scale))
+    M = cv2.getPerspectiveTransform(src, np.float32([[0, 0], [W, 0], [W, H], [0, H]]))
+    patch = cv2.cvtColor(cv2.warpPerspective(img, M, (W, H), flags=cv2.INTER_LINEAR), cv2.COLOR_BGR2GRAY)
+    angle = _tilt(patch, STRIP_W * 0.3)
+    R = cv2.getRotationMatrix2D((W / 2, H / 2), angle, 1.0)
+    level = cv2.warpAffine(patch, R, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    card_h = STRIP_W * 88 / 63
+    want_y = card_w * 0.03 * scale + 0.035 * card_h
+    bar = _bar_in_strip(level, card_h, want_y)
+    if bar is None:
+        return None
+    # Back to the photo: undo the levelling, then the straightening.
+    Ri = cv2.invertAffineTransform(R)
+    pts = np.float32(bar.quad())
+    pts = (np.hstack([pts, np.ones((4, 1), np.float32)]) @ Ri.T).astype(np.float32)
+    quad = cv2.perspectiveTransform(pts.reshape(-1, 1, 2), np.linalg.inv(M)).reshape(4, 2)
+    return quad.round(1).tolist(), bar.score

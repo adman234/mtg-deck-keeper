@@ -45,7 +45,7 @@ STRIP_ALIKE = 0.25
 STRIP_COLOUR = 18.0
 MIN_STRIPS = 2  # fewer title bars than this above a card isn't a column
 MAX_STRIPS = 40
-READ_PAD = 0.08  # of a card's width, either side
+READ_PAD = 0.2  # of a card's width, either side (cards in a column sit up to this far from its line)
 READ_W = 900  # title strips are cut out this wide for the model
 TITLE = (0.025, 0.11)  # the title bar's top and bottom below a card's top edge, in card heights
 
