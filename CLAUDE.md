@@ -2,9 +2,9 @@
 
 ## Workflow
 
-- When the owner asks for a change, finish it end to end: commit, push, open a PR to `main`,
-  wait for CI to pass, then merge it. Don't stop at "pushed to a branch" and ask.
-- If CI fails, fix it and push again before merging.
+- When the owner asks for a change, finish it end to end: run the checks below, commit and push
+  straight to `main`. No pull requests and no feature branches; don't leave work on a branch.
+- After pushing, watch the CI run on `main`; if it fails, fix it and push again.
 
 ## Checks to run before pushing
 
