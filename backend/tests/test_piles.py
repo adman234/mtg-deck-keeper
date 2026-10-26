@@ -298,9 +298,10 @@ def test_pre_pass_skipped_when_the_model_gives_boxes(admin):
     admin.put("/api/admin/settings", json={"values": {"vision.model": "daily"}})
     job_id = admin.post("/api/scans", files=[("files", ("a.jpg", _table_jpeg([(300, 300), (700, 300)]), "image/jpeg"))]).json()["id"]
     asyncio.run(scanner.process_job(job_id))
-    assert "crop" not in seen and seen.count("zoom") == 1
+    # The listed card gets a close-up, and so does the card OpenCV outlined that the model missed.
+    assert "crop" not in seen and seen.count("zoom") == 2
     raw = admin.get(f"/api/scans/{job_id}/debug").json()["images"][0]
-    assert raw["crops_found"] == 0 and "prepass" not in raw
+    assert raw["crops_found"] == 0 and "prepass" not in raw and raw["snap"]["unlisted"] == 1
 
 
 def test_pre_pass_runs_when_the_model_gives_no_boxes(admin):

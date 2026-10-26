@@ -62,6 +62,9 @@ def line_out(line: ScanLine, dets: dict[int, Detection], job_id: int) -> dict:
             "doubts": (d.raw or {}).get("doubts", []), "type_read": (d.raw or {}).get("type_read"),
             "set": d.raw_set, "collector_number": d.raw_number,
             "crop_url": f"/api/scans/{job_id}/crops/{d.id}" if d.crop_path else None,
+            "title_url": f"/api/scans/{job_id}/crops/{d.id}?part=title" if (d.raw or {}).get("title") else None,
+            "title_exact": ((d.raw or {}).get("title") or {}).get("exact"),
+            "title_box": _quad_box(((d.raw or {}).get("title") or {}).get("quad")),
         })
     return {
         "id": line.id, "card": card_out(line.card), "raw_name": line.raw_name, "qty": line.qty,
@@ -71,12 +74,20 @@ def line_out(line: ScanLine, dets: dict[int, Detection], job_id: int) -> dict:
     }
 
 
+def _quad_box(quad: list | None) -> list[int] | None:
+    if not quad:
+        return None
+    xs, ys = [p[0] for p in quad], [p[1] for p in quad]
+    return [round(min(xs)), round(min(ys)), round(max(xs) - min(xs)), round(max(ys) - min(ys))]
+
+
 def job_detail(db: Session, job: ScanJob) -> dict:
     dets = {d.id: d for img in job.images for d in img.detections}
     return {
         **job_summary(job),
         "threshold": app_settings.get(db, "vision.confidence_threshold"),
-        "images": [{"id": i.id, "filename": i.filename, "width": i.width, "height": i.height,
+        "images": [{"id": i.id, "filename": i.filename, "width": scanner.view_of(i)[1], "height": scanner.view_of(i)[2],
+                    "straightened": bool((i.debug or {}).get("straightened")),
                     "crops_found": i.crops_found, "photo_cards": i.photo_cards, "photo_error": i.photo_error,
                     "board": i.board, "runaway": (i.debug or {}).get("runaway"),
                     "tiled": (i.debug or {}).get("tiled"), "tiles": len((i.debug or {}).get("tiles") or []),
@@ -204,7 +215,7 @@ def debug_data(db: Session, job: ScanJob) -> dict:
         **job_summary(job),
         "expected": job.expected, "score_history": job.score_history,
         "images": [{
-            "id": img.id, "filename": img.filename, "size": [img.width, img.height],
+            "id": img.id, "filename": img.filename, "size": list(scanner.view_of(img)[1:]),
             "crops_found": img.crops_found, "photo_cards": img.photo_cards, "photo_error": img.photo_error,
             **(img.debug or {}),
             "detections": [{
@@ -213,27 +224,35 @@ def debug_data(db: Session, job: ScanJob) -> dict:
                 "model_confidence": d.model_confidence, "card": d.card_id and db.get(Card, d.card_id).name,
                 "match_score": d.match_score, "match_method": d.match_method, "raw": d.raw,
                 "crop_url": f"/api/scans/{job.id}/crops/{d.id}" if d.crop_path else None,
+                "title_url": f"/api/scans/{job.id}/crops/{d.id}?part=title" if (d.raw or {}).get("title") else None,
             } for d in img.detections],
         } for img in job.images],
     }
 
 
 @router.get("/{job_id}/photos/{image_id}")
-def photo(job_id: int, image_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
+def photo(job_id: int, image_id: int, original: bool = False, db: Session = Depends(get_db),
+          user: User = Depends(current_user)):
+    """The photo as the scan's boxes see it (straightened when it was taken at an angle), or
+    the original upload."""
     job = _job(db, job_id, user)
     img = next((i for i in job.images if i.id == image_id), None)
     if img is None:
         raise HTTPException(404, "Photo not found")
-    return FileResponse(img.path, media_type="image/jpeg")
+    path = img.path if original else scanner.view_of(img)[0]
+    return FileResponse(path, media_type="image/jpeg")
 
 
 @router.get("/{job_id}/crops/{detection_id}")
-def crop(job_id: int, detection_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
+def crop(job_id: int, detection_id: int, part: str = "card", db: Session = Depends(get_db),
+         user: User = Depends(current_user)):
+    """A detection's cut-out: the card or pile (part=card) or just its title bar (part=title)."""
     job = _job(db, job_id, user)
     det = db.get(Detection, detection_id)
-    if det is None or not det.crop_path or det.image_id not in {i.id for i in job.images}:
+    path = ((det.raw or {}).get("title") or {}).get("crop") if det and part == "title" else det and det.crop_path
+    if det is None or not path or det.image_id not in {i.id for i in job.images} or not Path(path).exists():
         raise HTTPException(404, "Crop not found")
-    return FileResponse(det.crop_path, media_type="image/jpeg")
+    return FileResponse(path, media_type="image/jpeg")
 
 
 # --- review editing --------------------------------------------------------

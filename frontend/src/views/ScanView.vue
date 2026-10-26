@@ -219,8 +219,8 @@ function photosOf(l) {
 function showInPhoto(l, imageId) {
   const i = scan.value.images.findIndex((img) => img.id === imageId);
   const img = scan.value.images[i];
-  const boxes = l.sources.filter((s) => s.image_id === imageId && s.bbox)
-    .map((s) => ({ bbox: s.bbox, label: `${s.raw_name} ×${s.qty}` }));
+  const boxes = l.sources.filter((s) => s.image_id === imageId && (s.title_box || s.bbox))
+    .map((s) => ({ bbox: s.title_box || s.bbox, label: `${s.raw_name}${s.qty > 1 ? ` ×${s.qty}` : ""}` }));
   located.value = { url: img.url, n: i + 1, width: img.width, height: img.height, boxes, title: l.card?.name || l.raw_name };
 }
 const boxStyle = (b, img) => ({
@@ -232,6 +232,7 @@ const failedPhotos = computed(() => (scan.value?.images || [])
   .map((img, i) => ({ n: i + 1, error: img.photo_error }))
   .filter((p) => p.error));
 const crops = (l) => l.sources.filter((s) => s.crop_url);
+const titleCrop = (l) => l.sources.find((s) => s.title_url && s.title_exact)?.title_url || l.sources.find((s) => s.title_url)?.title_url;
 </script>
 
 <template>
@@ -349,6 +350,9 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
                 <strong v-else class="unknown" :title="'What the model read'">“{{ l.raw_name }}”</strong>
                 <button class="link" @click="changing = l.id">Change</button>
               </div>
+              <button v-if="titleCrop(l)" class="title-crop" @click="zoom = titleCrop(l)" title="The name as it appears in your photo">
+                <img :src="titleCrop(l)" alt="The card's name in the photo" loading="lazy" />
+              </button>
               <p class="sub small">
                 <span v-if="unsure(l)">No card matches this well · </span>
                 <span v-else-if="!l.card">No matching card · </span>
@@ -598,6 +602,9 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
 .raw pre { white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 0.8rem; background: var(--bg); padding: 10px; border-radius: 6px; max-height: 320px; overflow: auto; margin: 6px 0 0; }
 .raw-photo { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line); }
 .raw summary { cursor: pointer; font-size: 0.9rem; }
+.title-crop { padding: 0; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); cursor: zoom-in;
+  align-self: flex-start; max-width: 100%; overflow: hidden; line-height: 0; }
+.title-crop img { height: 26px; width: auto; max-width: 100%; object-fit: cover; object-position: left center; display: block; }
 .stage-now { display: flex; flex-direction: column; gap: 6px; }
 .progress.thin { height: 6px; }
 .stages { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 2px; }

@@ -155,7 +155,7 @@ def _pair_by_overlap(cards: list[vision.ReadCard], found: list[list[int]]) -> li
 
 
 def snap_boxes(cards: list[vision.ReadCard], found: list[list[int]],
-               corners: list[list[list[float]]] | None = None) -> dict:
+               corners: list[list[list[float]]] | None = None, shift: bool = True) -> dict:
     """Move the model's boxes onto the cards OpenCV found.
 
     The model's boxes are rough: in scans 12 and 13 whole rows sat a third of a card or more too
@@ -179,6 +179,8 @@ def snap_boxes(cards: list[vision.ReadCard], found: list[list[int]],
         c, f = boxed[i], list(found[j])
         c.extra["model_bbox"] = c.extra["bbox"]
         c.extra["snapped"] = True
+        if corners:
+            c.extra["corners"] = corners[j]
         if c.count >= 2:
             c.extra["bbox"] = _union(c.extra["bbox"], f)
             if corners:
@@ -191,7 +193,7 @@ def snap_boxes(cards: list[vision.ReadCard], found: list[list[int]],
 
     shifted = 0
     snapped = {i for i, _ in pairs}
-    for i, c in enumerate(boxed):
+    for i, c in enumerate(boxed if shift else []):
         if i in snapped or c.count >= 2:
             continue  # a pile's box covers cards fanned out behind, unlike any found card
         r = row_of[i]
@@ -216,7 +218,8 @@ def snap_boxes(cards: list[vision.ReadCard], found: list[list[int]],
         shifted += 1
     used = {j for _, j in pairs}
     return {"found": [list(f) for f in found], "matched_by": matched_by, "snapped": len(pairs), "shifted": shifted,
-            "missed": [list(found[j]) for j in range(len(found)) if j not in used]}
+            "missed": [list(found[j]) for j in range(len(found)) if j not in used],
+            "missed_index": [j for j in range(len(found)) if j not in used]}
 
 
 def fit_sizes(cards: list[vision.ReadCard], found: list[list[int]], photo: tuple[int, int]) -> int:

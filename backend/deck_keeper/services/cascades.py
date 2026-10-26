@@ -33,6 +33,7 @@ STRIP_COLOUR = 18.0
 MIN_STRIPS = 2  # fewer title bars than this above a card isn't a column
 MAX_STRIPS = 40
 READ_W = 900  # title strips are cut out this wide for the model
+TITLE = (0.025, 0.11)  # the title bar's top and bottom below a card's top edge, in card heights
 
 
 @dataclass
@@ -40,6 +41,7 @@ class Strip:
     corners: list[list[float]]  # in the photo: top-left, top-right, bottom-right, bottom-left
     bbox: list[int]  # x, y, w, h in the photo
     score: float
+    title: list[list[float]] | None = None  # the title bar within the strip, in the photo
 
 
 @dataclass
@@ -167,7 +169,12 @@ def find(img: np.ndarray, found: list[list[list[float]]]) -> list[Column]:
             pts = cv2.perspectiveTransform(quad, inv).reshape(4, 2)
             x1, y1 = pts.min(0)
             x2, y2 = pts.max(0)
-            col.strips.append(Strip(pts.tolist(), [int(x1), int(y1), int(x2 - x1), int(y2 - y1)], round(score, 2)))
+            # The title bar: where it sits on a card, as far down as the strip shows.
+            t, b = top + TITLE[0] * CARD_H, min(below, top + TITLE[1] * CARD_H)
+            l, r = left + 0.04 * CARD_W, left + 0.96 * CARD_W
+            title = cv2.perspectiveTransform(np.float32([[[l, t]], [[r, t]], [[r, b]], [[l, b]]]), inv).reshape(4, 2)
+            col.strips.append(Strip(pts.tolist(), [int(x1), int(y1), int(x2 - x1), int(y2 - y1)], round(score, 2),
+                                    title.round(1).tolist()))
             below = top
         columns.append(col)
     return columns
