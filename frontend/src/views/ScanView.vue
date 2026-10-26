@@ -56,10 +56,8 @@ function addCard(card) {
   act(() => api(`/api/scans/${props.id}/lines`, { method: "POST", body: { card_id: card.id, qty: addQty.value, board: addBoard.value } }));
   addQty.value = 1;
 }
-const rerunLayout = ref("piles");
-watch(() => scan.value?.layout, (v) => v && (rerunLayout.value = v));
 async function rerun(prepass) {
-  await act(() => api(`/api/scans/${props.id}/rerun`, { method: "POST", body: { prepass, layout: rerunLayout.value } }));
+  await act(() => api(`/api/scans/${props.id}/rerun`, { method: "POST", body: { prepass, layout: "auto" } }));
   load();
 }
 async function del() {
@@ -144,18 +142,12 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
       <div>
         <p class="sub"><RouterLink to="/scans">Scans</RouterLink> / #{{ scan.id }}</p>
         <h1>{{ scan.name || `Scan #${scan.id}` }}</h1>
-        <p class="sub">{{ scan.total_images }} photo{{ scan.total_images === 1 ? "" : "s" }} · {{ scan.model || "default model" }} · {{ scan.layout === "spread" ? "spread out" : "piles" }} · pre-pass {{ scan.prepass ? "on" : "off" }} · {{ fmtDate(scan.created_at) }}</p>
+        <p class="sub">{{ scan.total_images }} photo{{ scan.total_images === 1 ? "" : "s" }} · {{ scan.model || "default model" }} · pre-pass {{ scan.prepass ? "on" : "off" }} · {{ fmtDate(scan.created_at) }}</p>
       </div>
       <template v-if="!['queued', 'processing'].includes(scan.status)">
         <details class="rerun">
           <summary class="btn small">Read again</summary>
           <div class="menu">
-            <label class="field small">Cards are
-              <select id="rerun-layout" v-model="rerunLayout">
-                <option value="piles">In piles of the same card</option>
-                <option value="spread">Spread out, all visible</option>
-              </select>
-            </label>
             <button class="btn small" @click="rerun(true)">With card pre-pass</button>
             <button class="btn small" @click="rerun(false)">Whole photos only</button>
             <p class="sub" style="font-size:0.8rem">Replaces the current review list.</p>

@@ -49,8 +49,9 @@ def test_close_up_read_wins_and_fixes_the_count(client):
 
 
 def test_close_up_of_the_wrong_pile_is_not_trusted(client):
-    """The box landed on the Counterspell pile, which the photo read also listed separately."""
+    """The Bolt box was drawn over the Counterspell pile, which the photo read listed separately."""
     bolt, counter = _card("Lightning Bolt"), _card("Counterspell")
+    bolt.extra["bbox"], counter.extra["bbox"] = [100, 100, 300, 400], [180, 100, 300, 400]
     bolt.extra["zoom"] = vision.ZoomRead("Counterspell", 4, 0.9, "{}")
     from deck_keeper.db import session_scope
     with session_scope() as db:
@@ -120,3 +121,84 @@ def test_copy_limit():
     assert scanner.copy_limit("Lightning Bolt") == 4
     assert scanner.copy_limit("Forest") is None and scanner.copy_limit("Relentless Rats") is None
     assert scanner.copy_limit("Seven Dwarves") == 7
+
+
+def test_close_up_beats_a_made_up_name_even_when_the_card_is_elsewhere(client):
+    """Scan 8: four separate Gaea's Cradles side by side. The whole-table read called them
+    "Orchin Martyr"; each close-up read Gaea's Cradle. Boxes don't overlap, so trust the close-ups."""
+    from deck_keeper.db import session_scope
+    entries = [_card("Orchin Martyr", count=1) for _ in range(3)] + [_card("Counterspell", count=1)]
+    for i, e in enumerate(entries):
+        e.extra["bbox"] = [i * 340, 0, 330, 500]
+        e.extra["zoom"] = vision.ZoomRead("Counterspell", 1, 0.95, "{}")
+    with session_scope() as db:
+        decisions = [piles.decide(matching.get_index(db), e, entries) for e in entries]
+    assert [d.name for d in decisions] == ["Counterspell"] * 4
+
+
+def test_disagreeing_counts_take_the_lower_one():
+    c = _card("Misty Rainforest", count=2)
+    c.extra["zoom"] = vision.ZoomRead("Misty Rainforest", 4, 0.9, "{}")
+    from deck_keeper.services.matching import CardIndex
+    d = piles.decide(CardIndex([(1, "Misty Rainforest")]), c, [c])
+    assert (d.count, d.count_differs) == (2, True)
+
+
+def test_no_title_in_close_up_leaves_the_name_unconfirmed():
+    c = _card("Meticulous Artisan", count=1)
+    c.extra["zoom"] = vision.ZoomRead("", 1, 1.0, "{}")
+    from deck_keeper.services.matching import CardIndex
+    d = piles.decide(CardIndex([(1, "Meticulous Artisan")]), c, [c])
+    assert (d.name, d.used, d.unsure) == ("Meticulous Artisan", "photo", True)
+
+
+def test_close_up_without_a_title_retries_taller(tmp_path):
+    import numpy as np
+    replies = iter([{"name": "", "count": 1, "confidence": 1}, {"name": "Forest", "count": 1, "confidence": 0.9}])
+    sizes = []
+
+    def model(request):
+        import base64
+        import cv2
+        url = json.loads(request.content)["messages"][-1]["content"][1]["image_url"]["url"]
+        img = cv2.imdecode(np.frombuffer(base64.b64decode(url.split(",", 1)[1]), np.uint8), cv2.IMREAD_COLOR)
+        sizes.append(img.shape[0])
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(next(replies))}}]})
+
+    vision.transport = httpx.MockTransport(model)
+    try:
+        card = _card("Meticulous Artisan", count=1)
+        card.extra["bbox"] = [400, 600, 300, 400]
+        img = np.full((1800, 2400, 3), 90, np.uint8)
+        asyncio.run(piles.zoom_in(img, [card], tmp_path, "photo-001",
+                                  vision.VisionConfig(base_url="http://x/v1", model="daily"), asyncio.Semaphore(1)))
+    finally:
+        vision.transport = None
+    zoom = card.extra["zoom"]
+    assert (zoom.name, zoom.retried) == ("Forest", True)
+    assert sizes[1] > sizes[0]  # second crop reaches further up
+    assert card.extra["crop_path"].endswith("-tall.jpg")
+
+
+def test_close_up_is_not_told_the_whole_table_name():
+    assert "thought this was" not in vision.ZOOM_PROMPT and "{hint}" not in vision.ZOOM_PROMPT
+
+
+def test_scan_8_regression_made_up_row_names_fixed_by_close_ups(admin):
+    """Four single Cradles in a row the whole-table read called "Orchin Martyr"."""
+    def model(request):
+        text = json.loads(request.content)["messages"][-1]["content"][0]["text"]
+        if "close-up" in text:
+            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(
+                {"name": "Counterspell", "count": 1, "confidence": 0.95})}}]})
+        return chat_reply([{"name": "Orchin Martyr", "count": 1, "confidence": 1.0, "box": [x, 33, x + 140, 333]}
+                           for x in (211, 363, 501, 635)])
+
+    vision.transport = httpx.MockTransport(model)
+    scryfall.transport = httpx.MockTransport(lambda r: httpx.Response(404, json={}))
+    admin.put("/api/admin/settings", json={"values": {"vision.model": "daily"}})
+    job_id = admin.post("/api/scans", data={"prepass": "false"},
+                        files=[("files", ("a.jpg", _table_jpeg([(300, 300)]), "image/jpeg"))]).json()["id"]
+    asyncio.run(scanner.process_job(job_id))
+    lines = admin.get(f"/api/scans/{job_id}").json()["lines"]
+    assert [(ln["card"]["name"], ln["qty"]) for ln in lines] == [("Counterspell", 4)]

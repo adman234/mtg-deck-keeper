@@ -46,37 +46,33 @@ BOX_HINT = (
     '"box" is where it is in the photo: [x1, y1, x2, y2] as numbers from 0 to 1000 across the '
     "image width and height (top-left to bottom-right)."
 )
-FOUR_HINT = (
-    "Most piles hold 1 to 4 cards and 4 is by far the most common; if you can't tell 4 from 5, answer 4."
+FOUR_HINT = "Only if you truly can't tell 4 from 5, answer 4."
+COUNT_HINT = (
+    "Count cards, not edges: a card in a sleeve shows two edges (sleeve and card)."
 )
 
-# Kept short on purpose: small models list fewer cards when a whole-table prompt asks for more detail.
-PHOTO_PROMPT = (
-    "List every distinct card visible in this photo. For each one, count how many copies of that "
-    "card are visible (count each physical card once). Include cards that are partly covered if the "
-    "title is readable. List each card name only once. " + BOX_HINT + ' Format: {"cards": [{"name": ..., '
-    '"count": ..., "confidence": ..., "box": [x1, y1, x2, y2]}]}'
+# One prompt for every layout: decks are often a mix of single cards and piles of copies.
+TABLE_PROMPT = (
+    "These Magic cards are laid out on a table. Some may lie on their own and some may be in piles: "
+    "copies of one card overlapped or fanned so the front card's title is fully visible and the cards "
+    "behind show only an edge or part of their title bar. The cards in a pile can be other printings "
+    "or languages of the same card. Make one entry for every separate card and every pile, even when "
+    "the same card appears several times side by side. For each entry give the name of the front "
+    "card and count = how many cards are in it (1 for a card on its own). " + COUNT_HINT + " "
+    + FOUR_HINT + " Never read or guess names from the slivers of cards behind the front one. "
+    + BOX_HINT + ' Format: {"cards": [{"name": ..., "count": ..., "confidence": ..., "box": [x1, y1, x2, y2]}]}'
 )
 
-PILES_PROMPT = (
-    "The cards in this photo are in piles. Each pile is several copies of the same card, overlapped so "
-    "only the FRONT card's title is fully visible and just the edges of the cards behind it show. The "
-    "cards behind can be other printings or languages of the same card. For each pile, give the name "
-    "of the front card only, and count = the number of cards in the pile including the front one "
-    "(count the stacked edges). " + FOUR_HINT + " Never read or guess names from the slivers of the "
-    "cards behind. A card on its own is a pile of 1. List every pile exactly once, even if two piles "
-    "show the same card. " + BOX_HINT + ' Format: {"cards": [{"name": ..., "count": ..., '
-    '"confidence": ..., "box": [x1, y1, x2, y2]}]}'
-)
-
-LAYOUTS = {"piles": PILES_PROMPT, "spread": PHOTO_PROMPT}
+# Kept for scans saved with a layout; every layout now uses the same prompt.
+LAYOUTS = {"auto": TABLE_PROMPT, "piles": TABLE_PROMPT, "spread": TABLE_PROMPT}
 
 ZOOM_PROMPT = (
     "This is a close-up of one spot on a table of Magic cards: a single card or a pile of copies of "
-    "one card, overlapped so the front card is on top. {hint}Read the title of the FRONT card (English "
-    "name if you recognise it, otherwise as printed) and count every physical card in the pile by "
-    "counting the stacked card edges, including the front card. " + FOUR_HINT + " Ignore cards that "
-    "are only cut off at the edges of this close-up. If no card title is visible, return an empty name. "
+    "one card, overlapped so the front card is on top. Read the title of the FRONT card in the middle "
+    "of the image (English name if you recognise it, otherwise as printed) and count the cards in "
+    "this one pile, including the front card. " + COUNT_HINT + " Only count cards stacked under the "
+    "front card; cards lying beside it belong to other piles, so ignore them and anything cut off at "
+    "the edges. " + FOUR_HINT + " If no title is visible, return an empty name. "
     'Format: {"name": ..., "count": ..., "confidence": ...}'
 )
 ZOOM_SCHEMA = {
@@ -253,7 +249,7 @@ async def read_cards_raw(cfg: VisionConfig, jpeg: bytes, single_card: bool,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": [
-                {"type": "text", "text": CROP_PROMPT if single_card else LAYOUTS.get(layout, PILES_PROMPT)},
+                {"type": "text", "text": CROP_PROMPT if single_card else LAYOUTS.get(layout, TABLE_PROMPT)},
                 {"type": "image_url", "image_url": {"url": image_url}},
             ]},
         ],
@@ -283,7 +279,7 @@ async def read_cards_raw(cfg: VisionConfig, jpeg: bytes, single_card: bool,
         content, reasoning = _message_text(choice["message"])
     except (KeyError, IndexError, TypeError, ValueError) as e:
         raise VisionError(f"Unexpected reply from vision server: {r.text[:300]}") from e
-    keep_repeats = not single_card and layout == "piles"
+    keep_repeats = not single_card  # each entry is a separate card or pile
     if content.strip():
         try:
             return parse_cards(content, keep_repeats), content
@@ -378,17 +374,20 @@ class ZoomRead:
     count: int | None
     confidence: float
     raw: str
+    retried: bool = False
 
 
-async def read_pile(cfg: VisionConfig, jpeg: bytes, hint: str | None = None) -> ZoomRead | None:
-    """Re-read one pile from a close-up: front card's name and how many cards are in it."""
-    hint_text = f'The whole-table read thought this was "{hint}"; check it. ' if hint else ""
+async def read_pile(cfg: VisionConfig, jpeg: bytes) -> ZoomRead | None:
+    """Re-read one pile from a close-up: front card's name and how many cards are in it.
+
+    Deliberately not told what the whole-table read said: given a name, small models repeat it.
+    """
     body = {
         "model": cfg.model,
         "temperature": 0,
         "max_tokens": 512,
         "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": [
-            {"type": "text", "text": ZOOM_PROMPT.replace("{hint}", hint_text)},
+            {"type": "text", "text": ZOOM_PROMPT},
             {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()}},
         ]}],
         "response_format": {"type": "json_schema", "json_schema": {"name": "pile", "schema": ZOOM_SCHEMA}},
