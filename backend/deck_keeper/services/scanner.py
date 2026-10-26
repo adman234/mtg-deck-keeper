@@ -309,7 +309,7 @@ async def process_job(job_id: int) -> None:
                         zoom = r.card.extra.get("zoom")
                         raw = {"photo": r.card.extra.get("raw"), "used": choice.used,
                                "count_differs": choice.count_differs,
-                               "unsure": choice.unsure,
+                               "unsure": choice.unsure, "zoom_region": r.card.extra.get("zoom_region"),
                                "zoom": zoom and {"name": zoom.name, "count": zoom.count, "retried": zoom.retried,
                                                  "confidence": zoom.confidence, "reply": zoom.raw}}
                         conf = zoom.confidence if choice.used == "zoom" and zoom else r.card.confidence
