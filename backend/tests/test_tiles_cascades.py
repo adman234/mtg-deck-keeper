@@ -46,12 +46,25 @@ def test_cards_seen_by_two_tiles_are_kept_once():
     assert [k.name for k in kept] == ["Scapeshift", "Sol Ring"]
 
 
+def test_names_cut_off_by_a_tile_edge_are_left_to_the_tile_that_saw_them_whole():
+    """Scan 18: the left tile's edge cut "Genesis Chamber" to "Genesis", a real card."""
+    left, right = tiles.Tile(0, 0, 1000, 1000), tiles.Tile(800, 0, 1000, 1000)
+    cut = _card("Genesis", [880, 300, 120, 60])  # boxed right up to the left tile's edge
+    whole = _card("Genesis Chamber", [880, 330, 300, 60])
+    edge = _card("Mountain", [1700, 600, 100, 60])  # at the photo's edge, not a seam: kept
+    kept = tiles.merge([(cut, left), (whole, right), (edge, right)], (1800, 1000))
+    assert [k.name for k in kept] == ["Genesis Chamber", "Mountain"]
+
+
 def test_columns_found_and_counted_even_photographed_at_an_angle():
     for n, tilt, drift in ((8, False, -4), (12, True, -4), (6, False, 6)):
         img, _ = column(n, drift=drift, tilt=tilt)
         found = detection.find_cards(img)
         cols = cascades.find(img, [f.corners for f in found])
         assert [len(c.strips) for c in cols] == [n - 1], (n, tilt)
+        front = np.float32(found[cols[0].front].corners).reshape(-1, 1, 2)
+        for s in cols[0].strips:  # no strip is the front card's own title
+            assert cv2.pointPolygonTest(front, tuple(float(v) for v in np.mean(s.title, 0)), False) < 0
         strip = cascades.cut(img, cols[0].strips[0])
         assert strip.shape[1] == cascades.READ_W and 40 < strip.shape[0] < 200
 
@@ -84,12 +97,15 @@ def test_scan_reads_each_title_in_a_column(admin):
     img, n = column(7, tilt=True)
     jpeg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 95])[1].tobytes()
     titles = iter([f"Card {k}" for k in range(1, 20)])
+    strips = iter(range(100))
 
     def model(request):
         text = json.loads(request.content)["messages"][-1]["content"][0]["text"]
         if "top strip" in text:
+            # One strip has no readable title (the table past the column's end): it is dropped.
+            name = "" if next(strips) == 3 else next(titles)
             return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(
-                {"name": next(titles), "confidence": 0.9})}}]})
+                {"name": name, "confidence": 0.9})}}]})
         if "close-up" in text:
             return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(
                 {"name": "Front Card", "type": "", "count": 1, "confidence": 0.9})}}]})
@@ -103,9 +119,10 @@ def test_scan_reads_each_title_in_a_column(admin):
     asyncio.run(scanner.process_job(job_id))
     scan = admin.get(f"/api/scans/{job_id}").json()
     names = sorted(ln["raw_name"] for ln in scan["lines"])
-    assert names == sorted(["Front Card", *[f"Card {k}" for k in range(1, n)]]), names
+    assert names == sorted(["Front Card", *[f"Card {k}" for k in range(1, n - 1)]]), names
     raw = admin.get(f"/api/scans/{job_id}/debug").json()["images"][0]
     assert raw["columns"][0]["strips"] == n - 1 and raw["replaced_by_strips"] == 1
+    assert raw["unreadable_strips"] == 1
     strip = next(d for d in raw["detections"] if d["source"] == "strip")
     assert strip["crop_url"] and strip["raw"]["strip"]["column"] == 1
 

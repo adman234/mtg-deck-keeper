@@ -94,6 +94,7 @@ def job_detail(db: Session, job: ScanJob) -> dict:
                     "tiled": (i.debug or {}).get("tiled"), "tiles": len((i.debug or {}).get("tiles") or []),
                     "columns": len((i.debug or {}).get("columns") or []),
                     "strips": sum(c["strips"] for c in (i.debug or {}).get("columns") or []),
+                    "unreadable_strips": (i.debug or {}).get("unreadable_strips", 0),
                     "unconfirmed_crops": sum(1 for d in i.detections if d.match_method == "unconfirmed"),
                     "url": f"/api/scans/{job.id}/photos/{i.id}"} for i in job.images],
         "lines": [line_out(ln, dets, job.id) for ln in job.lines],

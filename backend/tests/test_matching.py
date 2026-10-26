@@ -27,3 +27,12 @@ def test_accents_and_punctuation_ignored():
 def test_search_prefers_prefix():
     names = [m.name for m in INDEX.search("light")]
     assert names[:2] == ["Lightning Bolt", "Lightning Strike"]
+
+
+def test_the_first_words_of_one_card_name_match_it():
+    idx = CardIndex([(1, "Pia and Kiran Nalaar"), (2, "Siege-Gang Commander"), (3, "Siege-Gang Lieutenant"),
+                     (4, "Genesis"), (5, "Genesis Chamber")])
+    assert idx.match("Pia and Kiran")[0].name == "Pia and Kiran Nalaar"
+    assert idx.match("Siege-Gang")[0].score < 88  # two cards start so: can't tell which
+    assert idx.match("Genesis")[0].name == "Genesis"  # a whole name wins
+    assert all(m.score < 88 for m in idx.match("Pia"))  # too little of the name

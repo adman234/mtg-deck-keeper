@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session
 from ..models import Card
 
 MIN_SCORE = 60.0
+PREFIX_SCORE = 88.0  # a read that is the first words of one card's name, and nothing closer
+PREFIX_MIN = 0.55  # ...and at least this much of it
 
 _lock = threading.Lock()
 _index: "CardIndex | None" = None
@@ -67,6 +69,13 @@ class CardIndex:
             card_id, name = self.targets[idx]
             if all(m.card_id != card_id for m in results):
                 results.append(Match(card_id, name, round(float(score), 1)))
+        if not results or results[0].score < PREFIX_SCORE:
+            # The start of a name, cut off by something lying over the card (scan 18: "Pia and
+            # Kiran" for Pia and Kiran Nalaar): good enough when only one card's name starts so.
+            longer = {self.targets[i] for i, k in enumerate(self.keys) if k.startswith(key + " ")}
+            if len(longer) == 1 and len(key) >= PREFIX_MIN * len(normalize(next(iter(longer))[1])):
+                card_id, name = next(iter(longer))
+                results = [Match(card_id, name, PREFIX_SCORE)] + [m for m in results if m.card_id != card_id]
         return results[:limit]
 
     def search(self, query: str, limit: int = 10) -> list[Match]:

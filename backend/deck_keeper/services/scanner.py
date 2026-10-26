@@ -181,6 +181,10 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
     strips: list[vision.ReadCard] = []
     if columns:
         strips = await _read_strips(img, columns, crop_dir, stem, cfg, sem)
+        # A strip with no readable title is almost always not a card: the table past the end of a
+        # column, or a step that landed inside a card (scan 18: 22 of them, one real card).
+        debug["unreadable_strips"] = sum(not c.name for c in strips)
+        strips = [c for c in strips if c.name]
         covered = [np.float32(c.extra["strip"]["corners"]) for c in strips]
         before = len(cards)
         cards = [c for c in cards if not _inside_any(c.extra.get("bbox"), covered)]
@@ -262,7 +266,7 @@ async def _read_strips(img: np.ndarray, columns: list[cascades.Column], crop_dir
         async with sem:
             read = await vision.read_title(cfg, buf.tobytes())
         progress.tick()
-        name = read.name if read and read.name else f"Unreadable title (column {c + 1}, card {k + 1})"
+        name = read.name if read and read.name else ""
         return vision.ReadCard(name=name, count=1, confidence=read.confidence if read and read.name else 0.0,
                                extra={"bbox": strip.bbox, "crop_path": str(path),
                                       "strip": {"column": c + 1, "card": k + 1, "corners": strip.corners,

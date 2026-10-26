@@ -55,17 +55,28 @@ def find_cards(img: np.ndarray, max_cards: int = 100) -> list[FoundCard]:
     area = h * w
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     quads: list[tuple[float, np.ndarray, list[int]]] = []
+    hulls: list[tuple[float, np.ndarray, list[int]]] = []
     for c in _candidates(gray):
         a = cv2.contourArea(c)
         if a < area * 0.004 or a > area * 0.95:
             continue
         approx = cv2.approxPolyDP(c, 0.02 * cv2.arcLength(c, True), True)
         if len(approx) != 4 or not cv2.isContourConvex(approx):
+            # A notch in the outline (glare on a sleeve, the card behind showing at a corner)
+            # gives more corners: the outline's hull may still be the card (scan 18).
+            hull = cv2.convexHull(c)
+            approx = cv2.approxPolyDP(hull, 0.02 * cv2.arcLength(hull, True), True)
+            if len(approx) != 4 or not cv2.isContourConvex(approx) or not _card_shaped(approx, a):
+                continue
+            x, y, bw, bh = cv2.boundingRect(approx)
+            hulls.append((a, approx, [int(x), int(y), int(bw), int(bh)]))
             continue
         if not _card_shaped(approx, a):
             continue
         x, y, bw, bh = cv2.boundingRect(approx)
         quads.append((a, approx, [int(x), int(y), int(bw), int(bh)]))
+    # ...but only where no outline was found as it is: a hull also takes in what sticks out.
+    quads += [h for h in hulls if not any(_iou(h[2], q[2]) > 0.4 or _contains(h[2], q[2]) for q in quads)]
 
     # Largest first; drop duplicates (same card found by several masks) and inner boxes (art frames).
     # But a quad holding a much more card-shaped one that fills most of it is a small pile (or a

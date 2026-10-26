@@ -314,7 +314,7 @@ const titleCrop = (l) => l.sources.find((s) => s.title_url && s.title_exact)?.ti
           <span class="num">{{ secs(f.seconds) }}</span>
         </li>
       </ol>
-      <p class="sub">The first photo can take a while if llama-swap has to load the model. You can leave this page; the scan keeps running.</p>
+      <p class="sub">This usually takes about 5 minutes for a 100-card deck. You can leave this page; the scan keeps running.</p>
     </div>
 
     <div v-if="scan.status === 'failed'" class="alert">
@@ -589,6 +589,7 @@ const titleCrop = (l) => l.sources.find((s) => s.title_url && s.title_exact)?.ti
               <span v-if="img.photo_error" class="warn-text"> · whole-photo read failed</span>
               <span v-if="img.tiled"> · read again in {{ img.tiles }} tiles ({{ img.tiled }})</span>
               <span v-if="img.strips"> · {{ img.strips }} title{{ img.strips === 1 ? "" : "s" }} read one by one in {{ img.columns }} column{{ img.columns === 1 ? "" : "s" }}</span>
+              <span v-if="img.unreadable_strips"> ({{ img.unreadable_strips }} with no readable title ignored)</span>
               <span v-if="img.runaway" class="warn-text"> · the model got stuck repeating “{{ img.runaway.name }}”; {{ img.runaway.dropped }} of those ignored</span>
               <span v-if="img.unconfirmed_crops"> · {{ img.unconfirmed_crops }} unreadable cut-out{{ img.unconfirmed_crops === 1 ? "" : "s" }} ignored</span>
             </figcaption>

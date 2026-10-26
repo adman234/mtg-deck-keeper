@@ -25,6 +25,7 @@ OVERLAP = 0.18  # of a tile's size, so a card on a seam is whole in one of them
 MIN_SIDE = 1024  # tiles are scaled up to at least this (the model resizes small images anyway)
 SAME_CARD_IOU = 0.3
 SAME_NAME_IOU = 0.15
+SEAM = 0.02  # an entry boxed this close to a tile's inner edge (of the tile's size) was cut off by it
 SMALL_CARDS = 9  # cards narrower than 1/9 of the photo: tile even if the read looked fine
 CASCADE_TILES = 15  # this many title bars found in cascading columns: skip the whole-photo read
 TILE_CARDS = (3.2, 2.4)  # a tile is about this many card widths and heights
@@ -93,11 +94,22 @@ def _edge_margin(box: list[int], tile: Tile, photo: tuple[int, int]) -> float:
     return min(gaps) if gaps else float("inf")
 
 
+def _contains(t: Tile, box: list[int]) -> bool:
+    x, y, w, h = box
+    return t.x <= x and t.y <= y and x + w <= t.x + t.w and y + h <= t.y + t.h
+
+
 def merge(found: list[tuple[vision.ReadCard, Tile]], photo: tuple[int, int]) -> list[vision.ReadCard]:
     """Keep each card once: of entries boxed on the same spot by different tiles, the one seen
-    furthest from a seam. Entries without a box can't be told apart and are dropped."""
-    ranked = sorted(((c, t, _edge_margin(c.extra["bbox"], t, photo)) for c, t in found if c.extra.get("bbox")),
-                    key=lambda e: -e[2])
+    furthest from a seam. Entries without a box can't be told apart and are dropped, and so are
+    entries cut off by a seam that another tile sees whole: the tile's edge cuts the title too,
+    and the model reads what's left of it (scan 18: "Genesis" for Genesis Chamber, "Spring" for
+    Springjack Pasture), often another real card."""
+    tiles = {id(t): t for _, t in found}.values()
+    boxed = [(c, t, _edge_margin(c.extra["bbox"], t, photo)) for c, t in found if c.extra.get("bbox")]
+    boxed = [(c, t, m) for c, t, m in boxed
+             if m > SEAM * min(t.w, t.h) or not any(o is not t and _contains(o, c.extra["bbox"]) for o in tiles)]
+    ranked = sorted(boxed, key=lambda e: -e[2])
     kept: list[tuple[vision.ReadCard, Tile]] = []
     for c, t, _ in ranked:
         same = False
