@@ -16,17 +16,17 @@ from PIL import Image, ImageOps
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import app_settings
+from .. import app_settings, build_id
 from ..db import session_scope
 from ..models import Card, Detection, ScanImage, ScanJob, ScanLine
-from . import detection, evidence, matching, piles, resolver, scryfall, vision
+from . import cascades, decklists, detection, evidence, matching, piles, resolver, scryfall, tiles, vision
 
 log = logging.getLogger(__name__)
 
 BASIC_LANDS = {"Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes",
                "Snow-Covered Plains", "Snow-Covered Island", "Snow-Covered Swamp",
                "Snow-Covered Mountain", "Snow-Covered Forest"}
-STORED_MAX_SIDE = 2400
+STORED_MAX_SIDE = 4096  # full phone resolution: title strips and tiles need every pixel
 
 _wakeup = asyncio.Event()
 
@@ -103,6 +103,9 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
     sent = (int(w * scale), int(h * scale))
     reads: list[_Read] = []
     photo_cards, photo_error, debug = None, None, None
+    cards: list[vision.ReadCard] = []
+    crop_dir, stem = Path(img_row.path).parent / "crops", Path(img_row.path).stem
+    outlines = await asyncio.to_thread(detection.find_cards, img)  # cards OpenCV sees whole (no model)
     try:
         cards, reply = await ask_photo(_jpeg_for_model(img, max_side))
     except vision.VisionError as e:
@@ -111,30 +114,55 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
         log.warning("Whole-photo read of %s failed: %s", img_row.filename, e)
     else:
         box_scale = piles.place_boxes(cards, sent, (w, h))
+        listed = len(cards)
         runaway = piles.drop_runaway(cards)
+        debug = {"reply": reply, "sent_size": list(sent), "box_scale": box_scale, "runaway": runaway}
+        # 2. Many small cards: read the full-resolution photo again in overlapping tiles.
+        card_w = float(np.median([min(f.bbox[2:]) for f in outlines])) if outlines else None
+        why = tiles.reason(listed, vision.cut_off(reply), runaway, card_w, w)
+        if zoom and why:
+            tiled, tile_debug = await tiles.read(img, cfg, sem, max_side, listed)
+            debug["tiled"], debug["tiles"] = why, tile_debug
+            if tiled:
+                cards, box_scale = tiled, box_scale or "tiles"
         cards, duplicates = piles.drop_duplicates(cards)
-        debug = {"reply": reply, "sent_size": list(sent), "box_scale": box_scale, "runaway": runaway,
-                 "duplicates": [{"name": d.name, "count": d.count, "box": d.extra.get("bbox")} for d in duplicates]}
+        debug["duplicates"] = [{"name": d.name, "count": d.count, "box": d.extra.get("bbox")} for d in duplicates]
+
+    # 3. Cascading columns: OpenCV finds each title bar; each is cut out and read on its own,
+    #    replacing what the whole-photo read listed there.
+    strips: list[vision.ReadCard] = []
+    if zoom and outlines:
+        columns = await asyncio.to_thread(cascades.find, img, [f.corners for f in outlines])
+        if columns:
+            strips = await _read_strips(img, columns, crop_dir, stem, cfg, sem)
+            covered = [np.float32(c.extra["strip"]["corners"]) for c in strips]
+            before = len(cards)
+            cards = [c for c in cards if not _inside_any(c.extra.get("bbox"), covered)]
+            debug = {**(debug or {}), "columns": [{"front": outlines[col.front].bbox, "strips": len(col.strips)}
+                                                  for col in columns],
+                     "replaced_by_strips": before - len(cards)}
+
+    if not photo_error:
         if zoom and box_scale:
             # The model's boxes are rough; line them up with the cards OpenCV can find (no model calls).
-            outlines = await asyncio.to_thread(detection.find_cards, img)
             debug["snap"] = piles.snap_boxes(cards, [f.bbox for f in outlines], [f.corners for f in outlines])
             debug["snap"]["resized"] = piles.fit_sizes(cards, [f.bbox for f in outlines], (w, h))
             await asyncio.to_thread(piles.count_fans, img, cards)
-            await piles.zoom_in(img, cards, Path(img_row.path).parent / "crops", Path(img_row.path).stem, cfg, sem)
+            await piles.zoom_in(img, cards, crop_dir, stem, cfg, sem)
             if index is not None:
                 await piles.settle(img, cards, index, cfg, sem)
         photo_cards = len(cards)
         reads.extend(_Read("photo", c.extra.get("crop_path"), c.extra.get("bbox"), c) for c in cards)
+    reads.extend(_Read("strip", c.extra.get("crop_path"), c.extra.get("bbox"), c) for c in strips)
 
-    # 2. Pre-pass only as a fallback: when the whole-photo read failed or gave no usable boxes,
+    # 4. Pre-pass only as a fallback: when the whole-photo read failed or gave no usable boxes,
     #    nothing got a close-up, so cut cards out with OpenCV and read them one at a time.
     has_boxes = any(r.bbox for r in reads)
     found: list[detection.FoundCard] = []
     if prepass and (photo_error or not has_boxes):
         reason = "whole-photo read failed" if photo_error else "no usable boxes from the model"
         debug = {**(debug or {}), "prepass": reason}
-        found = await asyncio.to_thread(detection.find_cards, img)
+        found = outlines
         crop_dir = Path(img_row.path).parent / "crops"
         crop_dir.mkdir(exist_ok=True)
         tasks = []
@@ -150,9 +178,38 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
                 crop_errors.append(e)
         if photo_error and (not tasks or len(crop_errors) == len(tasks)):
             raise vision.VisionError(photo_error)
-    elif photo_error:
+    elif photo_error and not reads:
         raise vision.VisionError(photo_error)
     return _ImageResult(len(found), reads, photo_cards, photo_error, debug)
+
+
+async def _read_strips(img: np.ndarray, columns: list[cascades.Column], crop_dir: Path, stem: str,
+                       cfg: vision.VisionConfig, sem: asyncio.Semaphore) -> list[vision.ReadCard]:
+    """Cut out each title strip of each column and read it on its own."""
+    crop_dir.mkdir(exist_ok=True)
+
+    async def one(c: int, k: int, strip: cascades.Strip) -> vision.ReadCard:
+        ok, buf = cv2.imencode(".jpg", cascades.cut(img, strip), [cv2.IMWRITE_JPEG_QUALITY, 92])
+        path = crop_dir / f"{stem}-col{c:02d}-{k:02d}.jpg"
+        path.write_bytes(buf.tobytes())
+        async with sem:
+            read = await vision.read_title(cfg, buf.tobytes())
+        name = read.name if read and read.name else f"Unreadable title (column {c + 1}, card {k + 1})"
+        return vision.ReadCard(name=name, count=1, confidence=read.confidence if read and read.name else 0.0,
+                               extra={"bbox": strip.bbox, "crop_path": str(path),
+                                      "strip": {"column": c + 1, "card": k + 1, "corners": strip.corners,
+                                                "edge_score": strip.score, "reply": read.raw if read else None}})
+
+    return list(await asyncio.gather(*(one(c, k, s) for c, col in enumerate(columns)
+                                       for k, s in enumerate(col.strips))))
+
+
+def _inside_any(bbox: list[int] | None, quads: list[np.ndarray]) -> bool:
+    """Whether a box's centre lies on one of the title strips."""
+    if not bbox:
+        return False
+    centre = (bbox[0] + bbox[2] / 2, bbox[1] + bbox[3] / 2)
+    return any(cv2.pointPolygonTest(q.reshape(-1, 1, 2), centre, False) >= 0 for q in quads)
 
 
 def _doubts(index: matching.CardIndex, card: vision.ReadCard, res: resolver.Resolution) -> list[str]:
@@ -302,6 +359,20 @@ def build_lines(db: Session, job: ScanJob, threshold: float) -> list[ScanLine]:
     return lines
 
 
+def line_facts(db: Session, lines: list[ScanLine]) -> list[dict]:
+    return [{"card_id": ln.card_id, "name": db.get(Card, ln.card_id).name if ln.card_id else ln.raw_name,
+             "qty": ln.qty} for ln in lines]
+
+
+def record_score(db: Session, job: ScanJob, lines: list[ScanLine]) -> None:
+    """Score this read against the real decklist the user gave (before any edits)."""
+    result = decklists.score(job.expected, line_facts(db, lines))
+    entry = {"at": datetime.now(UTC).isoformat(), "build": build_id(), "model": job.model,
+             "right": result["right"], "total": result["total"],
+             "missing": result["missing"][:40], "extra": result["extra"][:40]}
+    job.score_history = [*(job.score_history or []), entry][-30:]
+
+
 async def process_job(job_id: int) -> None:
     with session_scope() as db:
         job = db.get(ScanJob, job_id)
@@ -354,6 +425,8 @@ async def process_job(job_id: int) -> None:
                 photo_reads = [r.card for r in reads if r.source == "photo"]
                 for r in reads:
                     card, raw = r.card, {"reply_entry": r.card.extra.get("raw")}
+                    if r.source == "strip":
+                        raw = {"strip": r.card.extra["strip"]}
                     if r.source == "photo":
                         choice = piles.decide(matching.get_index(db), r.card, photo_reads)
                         zoom = r.card.extra.get("zoom")
@@ -422,6 +495,8 @@ async def process_job(job_id: int) -> None:
             for line in lines:
                 db.add(line)
             db.flush()
+            if job.expected:
+                record_score(db, job, lines)
             # Card pictures for the review screen (lines without a cut-out show these instead).
             job.step = "Fetching card images"
             db.commit()

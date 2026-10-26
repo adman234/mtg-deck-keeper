@@ -96,6 +96,9 @@ class ScanJob(Base):
     deck_id: Mapped[int | None] = mapped_column(ForeignKey("decks.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Testing: the real decklist pasted by the user, and how each read of the photos scored on it.
+    expected: Mapped[list | None] = mapped_column(JSON)
+    score_history: Mapped[list | None] = mapped_column(JSON)
     images: Mapped[list["ScanImage"]] = relationship(cascade="all, delete-orphan", order_by="ScanImage.id")
     lines: Mapped[list["ScanLine"]] = relationship(cascade="all, delete-orphan", order_by="ScanLine.id")
 

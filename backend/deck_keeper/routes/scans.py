@@ -1,8 +1,11 @@
+import io
+import json
 import shutil
+import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -12,7 +15,7 @@ from ..config import get_env
 from ..db import get_db
 from ..deps import current_user
 from ..models import Card, Deck, DeckCard, Detection, ScanImage, ScanJob, ScanLine, User
-from ..services import scanner, scryfall
+from ..services import decklists, matching, scanner, scryfall
 from .cards import card_out
 
 router = APIRouter(prefix="/api/scans", tags=["scans"])
@@ -75,9 +78,26 @@ def job_detail(db: Session, job: ScanJob) -> dict:
         "images": [{"id": i.id, "filename": i.filename, "width": i.width, "height": i.height,
                     "crops_found": i.crops_found, "photo_cards": i.photo_cards, "photo_error": i.photo_error,
                     "board": i.board, "runaway": (i.debug or {}).get("runaway"),
+                    "tiled": (i.debug or {}).get("tiled"), "tiles": len((i.debug or {}).get("tiles") or []),
+                    "columns": len((i.debug or {}).get("columns") or []),
+                    "strips": sum(c["strips"] for c in (i.debug or {}).get("columns") or []),
                     "unconfirmed_crops": sum(1 for d in i.detections if d.match_method == "unconfirmed"),
                     "url": f"/api/scans/{job.id}/photos/{i.id}"} for i in job.images],
         "lines": [line_out(ln, dets, job.id) for ln in job.lines],
+        "test": _test_out(db, job),
+    }
+
+
+def _test_out(db: Session, job: ScanJob) -> dict | None:
+    if not job.expected:
+        return None
+    return {
+        "cards": sum(e["qty"] for e in job.expected),
+        "unknown": [e["name"] for e in job.expected if not e.get("card_id")],
+        "text": "\n".join(f"{e['qty']} {e.get('card_name') or e['name']}" + ("" if e["board"] == "main" else f"  [{e['board']}]")
+                          for e in job.expected),
+        "history": list(reversed(job.score_history or [])),
+        "now": decklists.score(job.expected, scanner.line_facts(db, job.lines)),
     }
 
 
@@ -174,8 +194,14 @@ def delete_scan(job_id: int, db: Session = Depends(get_db), user: User = Depends
 def debug(job_id: int, download: bool = False, db: Session = Depends(get_db), user: User = Depends(current_user)):
     """Everything the model said for this scan, for the raw-data view and bug reports."""
     job = _job(db, job_id, user)
-    data = {
+    headers = {"Content-Disposition": f'attachment; filename="scan-{job.id}-raw.json"'} if download else None
+    return JSONResponse(debug_data(db, job), headers=headers)
+
+
+def debug_data(db: Session, job: ScanJob) -> dict:
+    return {
         **job_summary(job),
+        "expected": job.expected, "score_history": job.score_history,
         "images": [{
             "id": img.id, "filename": img.filename, "size": [img.width, img.height],
             "crops_found": img.crops_found, "photo_cards": img.photo_cards, "photo_error": img.photo_error,
@@ -189,8 +215,6 @@ def debug(job_id: int, download: bool = False, db: Session = Depends(get_db), us
             } for d in img.detections],
         } for img in job.images],
     }
-    headers = {"Content-Disposition": f'attachment; filename="scan-{job.id}-raw.json"'} if download else None
-    return JSONResponse(data, headers=headers)
 
 
 @router.get("/{job_id}/photos/{image_id}")
@@ -286,6 +310,47 @@ def add_line(job_id: int, body: LineIn, db: Session = Depends(get_db), user: Use
                                   accepted=True, user_edited=True))
     db.commit()
     return job_detail(db, job)
+
+
+class ExpectedIn(BaseModel):
+    text: str = Field(max_length=50_000)
+
+
+@router.put("/{job_id}/expected")
+def set_expected(job_id: int, body: ExpectedIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """The real decklist for these photos: every read is scored against it from now on."""
+    job = _job(db, job_id, user)
+    entries = decklists.parse(body.text, matching.get_index(db))
+    if not entries:
+        raise HTTPException(400, "No cards found in that list")
+    job.expected = [{"qty": e.qty, "name": e.name, "board": e.board, "card_id": e.card_id, "card_name": e.card_name}
+                    for e in entries]
+    db.commit()
+    return job_detail(db, job)
+
+
+@router.delete("/{job_id}/expected")
+def clear_expected(job_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    job = _job(db, job_id, user)
+    job.expected = job.score_history = None
+    db.commit()
+    return job_detail(db, job)
+
+
+@router.get("/{job_id}/test-files")
+def test_files(job_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """Photos, the real decklist and everything the model said, zipped, to share for debugging."""
+    job = _job(db, job_id, user)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for n, img in enumerate(job.images, start=1):
+            if Path(img.path).exists():
+                z.write(img.path, f"photo-{n}{Path(img.filename).suffix.lower() or '.jpg'}")
+        if job.expected:
+            z.writestr("expected.txt", _test_out(db, job)["text"] + "\n")
+        z.writestr("scan.json", json.dumps(debug_data(db, job), indent=1, default=str))
+    return Response(buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="scan-{job.id}-test.zip"'})
 
 
 class BoardIn(BaseModel):

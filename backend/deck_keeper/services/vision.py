@@ -71,6 +71,12 @@ TABLE_PROMPT = (
     + BOX_HINT + ' Format: {"cards": [{"name": ..., "count": ..., "confidence": ..., "box": [x1, y1, x2, y2]}]}'
 )
 
+# One part of a photo with many cards, read on its own so each title gets more pixels.
+TILE_PROMPT = TABLE_PROMPT + (
+    " This image is one part of a larger photo: cards cut off at its edges are read from another "
+    "part, so only list cards whose title you can see in full."
+)
+
 # Kept for scans saved with a layout; every layout now uses the same prompt.
 LAYOUTS = {"auto": TABLE_PROMPT, "piles": TABLE_PROMPT, "spread": TABLE_PROMPT}
 
@@ -89,6 +95,19 @@ ZOOM_SCHEMA = {
     "properties": {"name": {"type": "string"}, "type": {"type": "string"}, "count": {"type": "integer", "minimum": 0},
                    "confidence": {"type": "number", "minimum": 0, "maximum": 1}},
     "required": ["name", "type", "count", "confidence"],
+}
+
+# One card's title bar, cut out of a column where the cards overlap so only titles show.
+TITLE_PROMPT = (
+    "This image is the top strip of one Magic card; the rest of the card is hidden under another "
+    "card. Read the card's name from its title bar (beside the mana cost), exactly as printed, or "
+    "the English name if you recognise the card. If you can't read it, return an empty name. "
+    'Format: {"name": ..., "confidence": ...}'
+)
+TITLE_SCHEMA = {
+    "type": "object",
+    "properties": {"name": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}},
+    "required": ["name", "confidence"],
 }
 
 CROP_PROMPT = (
@@ -244,8 +263,24 @@ async def read_cards(cfg: VisionConfig, jpeg: bytes, single_card: bool, layout: 
     return (await read_cards_raw(cfg, jpeg, single_card, layout))[0]
 
 
+def cut_off(text: str) -> bool:
+    """True when a reply's JSON ends before it closes (the model ran out of tokens)."""
+    text = text.strip()
+    fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
+    if fence:
+        text = fence.group(1)
+    start = min((i for i in (text.find("{"), text.find("[")) if i >= 0), default=-1)
+    if start < 0:
+        return False
+    try:
+        json.JSONDecoder().raw_decode(text[start:])
+    except json.JSONDecodeError:
+        return True
+    return False
+
+
 async def read_cards_raw(cfg: VisionConfig, jpeg: bytes, single_card: bool,
-                         layout: str = "piles") -> tuple[list[ReadCard], str]:
+                         layout: str = "piles", prompt: str | None = None) -> tuple[list[ReadCard], str]:
     """Like read_cards, but also returns the model's reply text for the scan's raw-data view."""
     if not cfg.model:
         raise VisionError("No vision model is configured. Choose one in Settings → Vision model.")
@@ -258,7 +293,7 @@ async def read_cards_raw(cfg: VisionConfig, jpeg: bytes, single_card: bool,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": [
-                {"type": "text", "text": CROP_PROMPT if single_card else LAYOUTS.get(layout, TABLE_PROMPT)},
+                {"type": "text", "text": prompt or (CROP_PROMPT if single_card else LAYOUTS.get(layout, TABLE_PROMPT))},
                 {"type": "image_url", "image_url": {"url": image_url}},
             ]},
         ],
@@ -387,20 +422,18 @@ class ZoomRead:
     type_line: str = ""  # the front card's type line as read, "" when not visible
 
 
-async def read_pile(cfg: VisionConfig, jpeg: bytes) -> ZoomRead | None:
-    """Re-read one pile from a close-up: front card's name and how many cards are in it.
-
-    Deliberately not told what the whole-table read said: given a name, small models repeat it.
-    """
+async def _ask_one(cfg: VisionConfig, jpeg: bytes, prompt: str, schema_name: str, schema: dict,
+                   what: str) -> tuple[dict, str] | None:
+    """One image, one JSON object back. None when the request or the reply fails."""
     body = {
         "model": cfg.model,
         "temperature": 0,
         "max_tokens": 512,
         "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": [
-            {"type": "text", "text": ZOOM_PROMPT},
+            {"type": "text", "text": prompt},
             {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()}},
         ]}],
-        "response_format": {"type": "json_schema", "json_schema": {"name": "pile", "schema": ZOOM_SCHEMA}},
+        "response_format": {"type": "json_schema", "json_schema": {"name": schema_name, "schema": schema}},
     }
     if cfg.disable_thinking:
         body["chat_template_kwargs"] = {"enable_thinking": False}
@@ -416,7 +449,7 @@ async def read_pile(cfg: VisionConfig, jpeg: bytes) -> ZoomRead | None:
             r.raise_for_status()
         content, reasoning = _message_text(r.json()["choices"][0]["message"])
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as e:
-        log.info("Pile close-up read failed: %s", e)
+        log.info("%s read failed: %s", what, e)
         return None
     text = content if content.strip() else reasoning
     start = text.find("{")
@@ -426,18 +459,42 @@ async def read_pile(cfg: VisionConfig, jpeg: bytes) -> ZoomRead | None:
         data, _ = json.JSONDecoder().raw_decode(text[start:])
     except json.JSONDecodeError:
         return None
-    if not isinstance(data, dict):
-        return None
+    return (data, text) if isinstance(data, dict) else None
+
+
+def _name_and_confidence(data: dict) -> tuple[str, float]:
     name = re.sub(r"\s+", " ", str(data.get("name") or "").replace("_", " ")).strip()
-    try:
-        count = int(data["count"]) if data.get("count") not in (None, "") else None
-    except (TypeError, ValueError):
-        count = None
     try:
         conf = float(data.get("confidence", 0.5))
     except (TypeError, ValueError):
         conf = 0.5
     conf = conf / 100 if conf > 1 else conf
+    return name, min(1.0, max(0.0, conf))
+
+
+async def read_pile(cfg: VisionConfig, jpeg: bytes) -> ZoomRead | None:
+    """Re-read one pile from a close-up: front card's name and how many cards are in it.
+
+    Deliberately not told what the whole-table read said: given a name, small models repeat it.
+    """
+    got = await _ask_one(cfg, jpeg, ZOOM_PROMPT, "pile", ZOOM_SCHEMA, "Pile close-up")
+    if got is None:
+        return None
+    data, text = got
+    name, conf = _name_and_confidence(data)
+    try:
+        count = int(data["count"]) if data.get("count") not in (None, "") else None
+    except (TypeError, ValueError):
+        count = None
     type_line = re.sub(r"\s+", " ", str(data.get("type") or "")).strip()
-    return ZoomRead(name, count if count and count > 0 else None, min(1.0, max(0.0, conf)), text,
-                    type_line=type_line)
+    return ZoomRead(name, count if count and count > 0 else None, conf, text, type_line=type_line)
+
+
+async def read_title(cfg: VisionConfig, jpeg: bytes) -> ZoomRead | None:
+    """Read the name on one title strip cut out of a cascading column."""
+    got = await _ask_one(cfg, jpeg, TITLE_PROMPT, "title", TITLE_SCHEMA, "Title strip")
+    if got is None:
+        return None
+    data, text = got
+    name, conf = _name_and_confidence(data)
+    return ZoomRead(name, 1, conf, text)

@@ -11,6 +11,7 @@ const props = defineProps({
   detections: { type: Array, default: () => [] },
   duplicates: { type: Array, default: () => [] },
   outlines: { type: Array, default: () => [] },
+  tiles: { type: Array, default: () => [] },
   filename: { type: String, default: "scan" },
 });
 
@@ -20,11 +21,13 @@ const LAYERS = [
   { id: "zoom", label: "Close-up area re-read", color: "#38d6ff", dash: true },
   { id: "model", label: "Model's box before lining up", color: "#e879f9", dash: true },
   { id: "outline", label: "Card outlines (OpenCV)", color: "#a3e635", dash: true },
+  { id: "strip", label: "Title strips (columns)", color: "#f472b6" },
+  { id: "tile", label: "Tiles read separately", color: "#94a3b8", dash: true },
   { id: "cutout", label: "Cut-outs (pre-pass)", color: "#4ade80" },
   { id: "ignored", label: "Ignored cut-outs", color: "#ff5c5c", dash: true },
   { id: "duplicate", label: "Dropped duplicates", color: "#b8b8c8", dash: true },
 ];
-const HIDDEN = ["zoom", "model", "outline"];
+const HIDDEN = ["zoom", "model", "outline", "tile"];
 const on = reactive(Object.fromEntries(LAYERS.map((l) => [l.id, !HIDDEN.includes(l.id)])));
 const style = Object.fromEntries(LAYERS.map((l) => [l.id, l]));
 
@@ -39,12 +42,15 @@ const shapes = computed(() => {
       }
       if (d.raw?.zoom_region) out.push({ layer: "zoom", box: d.raw.zoom_region, label: "" });
       if (d.raw?.model_box) out.push({ layer: "model", box: d.raw.model_box, label: "" });
+    } else if (d.source === "strip" && d.bbox) {
+      out.push({ layer: "strip", box: d.bbox, label: `${d.card || d.read_as}`, sub: d.card && d.card !== d.read_as ? `read “${d.read_as}”` : "" });
     } else if (d.bbox) {
       const ignored = d.match_method === "unconfirmed";
       out.push({ layer: ignored ? "ignored" : "cutout", box: d.bbox, label: `${ignored ? "ignored: " : ""}${d.read_as}`, below: 1 });
     }
   }
   for (const box of props.outlines) out.push({ layer: "outline", box, label: "" });
+  for (const box of props.tiles) out.push({ layer: "tile", box, label: "" });
   for (const d of props.duplicates) {
     if (d.box) out.push({ layer: "duplicate", box: d.box, label: `dropped: ${d.name} ×${d.count}`, below: 2 });
   }

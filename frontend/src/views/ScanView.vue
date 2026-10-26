@@ -145,6 +145,19 @@ const groups = computed(() => {
   if (added.length) out.push({ key: "added", title: "Added by you", lines: added });
   return out;
 });
+// Accuracy test: the real decklist, and how each read of these photos scored on it.
+const listText = ref("");
+const editingList = ref(false);
+function editList() {
+  listText.value = scan.value.test?.text || "";
+  editingList.value = true;
+}
+async function saveList() {
+  await act(() => api(`/api/scans/${props.id}/expected`, { method: "PUT", body: { text: listText.value } }));
+  if (!error.value) editingList.value = false;
+}
+const removeList = () => act(() => api(`/api/scans/${props.id}/expected`, { method: "DELETE" }));
+const cardsText = (list) => list.map(([n, q]) => (q > 1 ? `${q} ${n}` : n)).join(", ");
 const setPhotoBoard = (img, board) =>
   act(() => api(`/api/scans/${props.id}/images/${img.id}/board`, { method: "PUT", body: { board } }));
 const flagged = computed(() => lines.value.filter((l) => l.needs_review).length);
@@ -382,6 +395,47 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
         <p v-else-if="flagged" class="sub">{{ flagged }} flagged line{{ flagged === 1 ? " is" : "s are" }} still unchecked. You can save anyway and edit the deck later.</p>
       </form>
 
+      <section class="panel test">
+        <div class="row" style="justify-content:space-between">
+          <h2>Accuracy test</h2>
+          <a v-if="scan.test" class="btn small" :href="`/api/scans/${scan.id}/test-files`" download>Download test files</a>
+        </div>
+        <template v-if="!scan.test || editingList">
+          <p class="sub small">Paste the real decklist for these photos (Arena, Moxfield, MTGO or a plain list). Every time
+            the scan is read again, the automatic result is scored against it, so you can see whether an update helped.
+            “Download test files” bundles the photos, the list and everything the model said, to share for debugging.</p>
+          <textarea v-model="listText" rows="8" aria-label="Real decklist" placeholder="1 Titania, Protector of Argoth&#10;1 Sol Ring&#10;11 Forest"></textarea>
+          <div class="row">
+            <button class="btn small primary" :disabled="!listText.trim()" @click="saveList">Save list</button>
+            <button v-if="scan.test" class="btn small" @click="editingList = false">Cancel</button>
+          </div>
+        </template>
+        <template v-else>
+          <p><b class="num">{{ scan.test.now.right }} / {{ scan.test.now.total }}</b> cards right as the list stands now
+            <span class="sub small">(including your edits)</span></p>
+          <p v-if="scan.test.unknown.length" class="sub small warn-text">Not recognised in your list: {{ scan.test.unknown.join(", ") }}</p>
+          <div v-if="scan.test.history.length" class="table-wrap">
+            <table class="list">
+              <thead><tr><th>Read</th><th>Build</th><th>Right</th><th>Missing</th><th>Extra</th></tr></thead>
+              <tbody>
+                <tr v-for="(h, i) in scan.test.history" :key="i">
+                  <td class="small">{{ fmtDate(h.at) }}</td>
+                  <td class="small num">{{ h.build }}</td>
+                  <td class="num"><b>{{ h.right }}</b> / {{ h.total }}</td>
+                  <td class="small">{{ cardsText(h.missing) || "—" }}</td>
+                  <td class="small">{{ cardsText(h.extra) || "—" }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-else class="sub small">Use “Read again” to score the automatic result.</p>
+          <div class="row">
+            <button class="btn small" @click="editList">Edit list</button>
+            <button class="btn small danger" @click="removeList">Remove list</button>
+          </div>
+        </template>
+      </section>
+
       <section v-if="raw" class="panel raw">
         <div class="row" style="justify-content:space-between">
           <h2>Raw data</h2>
@@ -398,7 +452,7 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
           </p>
           <DebugOverlay :url="scan.images[i]?.url" :width="img.size[0]" :height="img.size[1]"
                         :detections="img.detections" :duplicates="img.duplicates || []"
-                        :outlines="img.snap?.found || []" :filename="img.filename" />
+                        :outlines="img.snap?.found || []" :tiles="(img.tiles || []).map((t) => t.region)" :filename="img.filename" />
           <details>
             <summary>Whole-photo reply</summary>
             <pre>{{ img.reply || "(none)" }}</pre>
@@ -411,7 +465,7 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
                   <td>{{ d.read_as }} <span class="sub small">({{ d.source }})</span></td>
                   <td class="num">{{ d.qty }}<span v-if="d.raw?.fan" class="sub small" :title="`Counted from the edges fanned out to the ${d.raw.fan.direction}`"> · {{ d.raw.fan.count }} by edges</span></td>
                   <td class="small">{{ d.raw?.photo ? `${d.raw.photo.name} ×${d.raw.photo.count}` : "—" }}</td>
-                  <td class="small">{{ d.raw?.zoom ? `${d.raw.zoom.name || "(no title)"} ×${d.raw.zoom.count ?? "?"}` : "—" }}<span v-if="d.raw?.used" class="sub"> · used {{ d.raw.used }}</span><span v-if="d.raw?.tiebreak" class="sub"> · asked to choose: {{ d.raw.tiebreak.name || "no answer" }}</span><span v-if="d.raw?.snapped" class="sub"> · box lined up</span><span v-else-if="d.raw?.shifted" class="sub"> · box moved</span></td>
+                  <td class="small">{{ d.raw?.zoom ? `${d.raw.zoom.name || "(no title)"} ×${d.raw.zoom.count ?? "?"}` : "—" }}<span v-if="d.raw?.used" class="sub"> · used {{ d.raw.used }}</span><span v-if="d.raw?.tiebreak" class="sub"> · asked to choose: {{ d.raw.tiebreak.name || "no answer" }}</span><span v-if="d.raw?.strip" class="sub">title strip: column {{ d.raw.strip.column }}, card {{ d.raw.strip.card }}</span><span v-if="d.raw?.snapped" class="sub"> · box lined up</span><span v-else-if="d.raw?.shifted" class="sub"> · box moved</span></td>
                   <td>{{ d.card || "—" }}</td>
                   <td class="num">{{ Math.round(d.match_score) }}%</td>
                   <td class="small">{{ d.match_method || "—" }}</td>
@@ -432,6 +486,8 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
               <span v-if="img.crops_found"> · {{ img.crops_found }} cut out (fallback)</span>
               <span v-if="img.photo_cards != null"> · {{ img.photo_cards }} listed from whole photo</span>
               <span v-if="img.photo_error" class="warn-text"> · whole-photo read failed</span>
+              <span v-if="img.tiled"> · read again in {{ img.tiles }} tiles ({{ img.tiled }})</span>
+              <span v-if="img.strips"> · {{ img.strips }} title{{ img.strips === 1 ? "" : "s" }} read one by one in {{ img.columns }} column{{ img.columns === 1 ? "" : "s" }}</span>
               <span v-if="img.runaway" class="warn-text"> · the model got stuck repeating “{{ img.runaway.name }}”; {{ img.runaway.dropped }} of those ignored</span>
               <span v-if="img.unconfirmed_crops"> · {{ img.unconfirmed_crops }} unreadable cut-out{{ img.unconfirmed_crops === 1 ? "" : "s" }} ignored</span>
             </figcaption>
@@ -518,6 +574,7 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
 .raw pre { white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 0.8rem; background: var(--bg); padding: 10px; border-radius: 6px; max-height: 320px; overflow: auto; margin: 6px 0 0; }
 .raw-photo { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line); }
 .raw summary { cursor: pointer; font-size: 0.9rem; }
+.test textarea { width: 100%; font-family: var(--mono); font-size: 0.85rem; }
 @media (max-width: 760px) {
   .line { grid-template-columns: 52px minmax(0, 1fr) auto; grid-template-areas: "t n c" "t q b" "a a a"; }
   .thumb { grid-area: t; } .name { grid-area: n; } .conf { grid-area: c; } .qty { grid-area: q; } select { grid-area: b; } .actions { grid-area: a; justify-content: flex-start; }

@@ -10,6 +10,7 @@ RUN npm run build
 FROM python:3.12-slim
 
 ARG VERSION=dev
+ARG BUILD=dev
 LABEL org.opencontainers.image.title="MTG Deck Keeper" \
       org.opencontainers.image.description="Self-hosted MTG decklists from photos using a local vision model" \
       org.opencontainers.image.source="https://github.com/adman234/mtg-deck-keeper" \
@@ -19,6 +20,7 @@ LABEL org.opencontainers.image.title="MTG Deck Keeper" \
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    APP_BUILD=${BUILD} \
     DATA_DIR=/app/data \
     PORT=9925 \
     PUID=99 \

@@ -74,6 +74,10 @@ def find_cards(img: np.ndarray, max_cards: int = 100) -> list[FoundCard]:
     kept: list[tuple[float, np.ndarray, list[int]]] = []
     for q in quads:
         bx = q[2]
+        # A playmat or a deck box is card-shaped too, but holds several cards: not a card.
+        inside = [o for o in quads if o[0] < q[0] * 0.5 and _contains(bx, o[2])]
+        if len([o for o in inside if not any(p[0] > o[0] and _contains(p[2], o[2]) for p in inside)]) >= 2:
+            continue
         if any(_contains(bx, o[2]) and o[0] >= q[0] * 0.6 and _shape_error(o[1]) + PILE_SHAPE < _shape_error(q[1])
                for o in quads if o is not q):
             continue
