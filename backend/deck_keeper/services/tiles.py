@@ -26,6 +26,9 @@ MIN_SIDE = 1024  # tiles are scaled up to at least this (the model resizes small
 SAME_CARD_IOU = 0.3
 SAME_NAME_IOU = 0.15
 SMALL_CARDS = 9  # cards narrower than 1/9 of the photo: tile even if the read looked fine
+CASCADE_TILES = 15  # this many title bars found in cascading columns: skip the whole-photo read
+TILE_CARDS = (3.2, 2.4)  # a tile is about this many card widths and heights
+MAX_TILES = 30
 
 
 @dataclass
@@ -49,12 +52,23 @@ def reason(entries: int, cut_off: bool, runaway: dict | None, card_width: float 
     return None
 
 
-def plan(w: int, h: int, cards: int) -> list[Tile]:
-    """A grid of overlapping tiles with about CARDS_PER_TILE cards each (at least 2 x 2), shaped
-    like the photo."""
-    n = max(4, math.ceil(cards / CARDS_PER_TILE))
-    cols = max(2, round(math.sqrt(n * w / h)))
-    rows = max(2, math.ceil(n / cols))
+def plan(w: int, h: int, cards: int | None, card: tuple[float | None, float | None] = (None, None)) -> list[Tile]:
+    """A grid of overlapping tiles, at least 2 x 2, shaped like the photo. Sized from the cards
+    when their size is known (each tile about TILE_CARDS card widths by heights, so a tile of
+    cascading columns holds a few columns of a dozen titles), else from how many were listed."""
+    cw, ch = card
+    if cw and ch:
+        cols = max(2, math.ceil(w / (TILE_CARDS[0] * cw)))
+        rows = max(2, math.ceil(h / (TILE_CARDS[1] * ch)))
+        while cols * rows > MAX_TILES and max(cols, rows) > 2:
+            if cols >= rows:
+                cols -= 1
+            else:
+                rows -= 1
+    else:
+        n = max(4, math.ceil((cards or 0) / CARDS_PER_TILE))
+        cols = max(2, round(math.sqrt(n * w / h)))
+        rows = max(2, math.ceil(n / cols))
     tw, th = w / (cols - (cols - 1) * OVERLAP), h / (rows - (rows - 1) * OVERLAP)
     out = []
     for r in range(rows):
@@ -102,11 +116,12 @@ def merge(found: list[tuple[vision.ReadCard, Tile]], photo: tuple[int, int]) -> 
 
 
 async def read(img: np.ndarray, cfg: vision.VisionConfig, sem: asyncio.Semaphore, max_side: int,
-               cards: int) -> tuple[list[vision.ReadCard], list[dict]]:
+               cards: int | None, card: tuple[float | None, float | None] = (None, None)
+               ) -> tuple[list[vision.ReadCard], list[dict]]:
     """Read the photo tile by tile. Returns the merged entries (boxes in photo pixels, as
     extra["bbox"]) and a debug record per tile."""
     H, W = img.shape[:2]
-    tiles = plan(W, H, cards)
+    tiles = plan(W, H, cards, card)
     progress.stage(f"Reading the photo again in {len(tiles)} tiles", len(tiles))
 
     async def one(t: Tile) -> tuple[Tile, list[vision.ReadCard], str | None, str | None]:

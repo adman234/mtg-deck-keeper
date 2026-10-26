@@ -157,3 +157,58 @@ def test_scan_keeps_how_long_each_stage_took(admin):
     stages = [t["stage"] for t in timings]
     assert stages[:2] == ["Finding card outlines", "Reading the whole photo"] and "Identifying cards" in stages
     assert admin.get(f"/api/scans/{job_id}").json()["progress"] is None  # done
+
+
+def test_tiles_sized_from_the_cards():
+    grid = tiles.plan(4904, 4088, None, (380, 530))  # scan 16: a straightened 100-card photo
+    cols = len({t.x for t in grid})
+    rows = len({t.y for t in grid})
+    assert (cols, rows) == (5, 4) and max(t.w for t in grid) < 3.2 * 380 * 1.3
+    assert len(tiles.plan(20000, 20000, None, (100, 140))) <= tiles.MAX_TILES
+
+
+def test_commander_decks_allow_one_copy():
+    assert scanner.copy_limit("Sol Ring", "100") == 1 and scanner.copy_limit("Forest", "100") is None
+    assert scanner.copy_limit("Sol Ring", "60+15") == 4 and scanner.copy_limit("Seven Dwarves", "99") == 7
+
+
+def test_deck_type_is_kept_and_can_be_changed(admin):
+    from .test_scan_flow import _jpeg
+    vision.transport = httpx.MockTransport(lambda r: chat_reply([{"name": "Lightning Bolt", "count": 2, "confidence": 0.9}]))
+    scryfall.transport = httpx.MockTransport(lambda r: httpx.Response(404, json={}))
+    admin.put("/api/admin/settings", json={"values": {"vision.model": "daily"}})
+    assert admin.post("/api/scans", data={"deck_type": "nope"},
+                      files=[("files", ("a.jpg", _jpeg(), "image/jpeg"))]).status_code == 400
+    job_id = admin.post("/api/scans", data={"deck_type": "100", "prepass": "false"},
+                        files=[("files", ("a.jpg", _jpeg(), "image/jpeg"))]).json()["id"]
+    asyncio.run(scanner.process_job(job_id))
+    scan = admin.get(f"/api/scans/{job_id}").json()
+    [line] = scan["lines"]
+    assert scan["deck_type"] == "100" and line["qty"] == 1 and "over_limit" in line["flags"]  # singleton
+    assert admin.put(f"/api/scans/{job_id}/deck-type", json={"deck_type": "60"}).json()["deck_type"] == "60"
+
+
+def test_many_title_bars_in_columns_skip_the_whole_photo_read(admin):
+    img, n = column(18, step=30)
+    jpeg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 95])[1].tobytes()
+    prompts = []
+
+    def model(request):
+        text = json.loads(request.content)["messages"][-1]["content"][0]["text"]
+        prompts.append("whole" if "laid out on a table" in text and "one part" not in text else
+                       "tile" if "one part" in text else "other")
+        if "top strip" in text:
+            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"name": "Forest", "confidence": 0.9})}}]})
+        if "close-up" in text:
+            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(
+                {"name": "Forest", "type": "Basic Land — Forest", "count": 1, "confidence": 0.9})}}]})
+        return chat_reply([])
+
+    vision.transport = httpx.MockTransport(model)
+    scryfall.transport = httpx.MockTransport(lambda r: httpx.Response(404, json={}))
+    admin.put("/api/admin/settings", json={"values": {"vision.model": "daily"}})
+    job_id = admin.post("/api/scans", files=[("files", ("a.jpg", jpeg, "image/jpeg"))]).json()["id"]
+    asyncio.run(scanner.process_job(job_id))
+    raw = admin.get(f"/api/scans/{job_id}/debug").json()["images"][0]
+    assert "whole" not in prompts and "tile" in prompts
+    assert raw["whole_photo"].startswith("skipped") and raw["columns"][0]["strips"] == n - 1

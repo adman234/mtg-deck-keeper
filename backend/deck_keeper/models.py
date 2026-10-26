@@ -96,6 +96,8 @@ class ScanJob(Base):
     deck_id: Mapped[int | None] = mapped_column(ForeignKey("decks.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # What the photos should add up to (see scanner.DECK_TYPES): sets copy limits and the totals check.
+    deck_type: Mapped[str] = mapped_column(String(20), default="other", server_default="other")
     # Testing: the real decklist pasted by the user, and how each read of the photos scored on it.
     expected: Mapped[list | None] = mapped_column(JSON)
     score_history: Mapped[list | None] = mapped_column(JSON)

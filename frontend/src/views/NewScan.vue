@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
-import { api, session } from "../api";
+import { api, DECK_TYPES, session } from "../api";
 
 const router = useRouter();
 const files = ref([]);
@@ -11,6 +11,10 @@ const error = ref("");
 const busy = ref(false);
 const dragging = ref(false);
 const settings = ref(null);
+const deckType = ref(readDeckType());
+function readDeckType() {
+  try { return localStorage.getItem("deck-type") || "60+15"; } catch { return "60+15"; }
+}
 
 onMounted(async () => {
   try {
@@ -46,6 +50,8 @@ async function submit() {
   files.value.forEach((f) => form.append("files", f.file, f.file.name));
   form.append("name", name.value);
   form.append("model", model.value);
+  form.append("deck_type", deckType.value);
+  try { localStorage.setItem("deck-type", deckType.value); } catch { /* not remembered */ }
   try {
     const job = await api("/api/scans", { method: "POST", form });
     router.push(`/scans/${job.id}`);
@@ -78,6 +84,11 @@ async function submit() {
     <form class="panel" @submit.prevent="submit">
       <label class="field">Scan name <small>optional, becomes the default deck name</small>
         <input id="scan-name" v-model="name" type="text" placeholder="e.g. Mono-Red Aggro" maxlength="200" />
+      </label>
+      <label class="field">What's in the photos? <small>checks the totals, and Commander decks allow one copy of each card</small>
+        <select id="scan-deck-type" v-model="deckType">
+          <option v-for="t in DECK_TYPES" :key="t.value" :value="t.value">{{ t.label }}</option>
+        </select>
       </label>
       <div class="row">
         <button class="btn primary" :disabled="!files.length || busy">{{ busy ? "Uploading…" : `Scan ${files.length || ""} photo${files.length === 1 ? "" : "s"}` }}</button>

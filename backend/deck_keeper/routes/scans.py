@@ -41,6 +41,7 @@ def job_summary(job: ScanJob) -> dict:
     return {
         "id": job.id, "name": job.name, "status": job.status, "step": job.step, "error": job.error,
         "prepass": job.prepass, "layout": job.layout, "model": job.model, "deck_id": job.deck_id,
+        "deck_type": job.deck_type or "other",
         "total_images": job.total_images, "processed_images": job.processed_images,
         "created_at": job.created_at.isoformat(),
         "finished_at": job.finished_at.isoformat() if job.finished_at else None,
@@ -126,6 +127,7 @@ async def create_scan(
     prepass: bool | None = Form(None),  # default: the fallback setting
     layout: str = Form("auto"),
     model: str = Form(""),
+    deck_type: str = Form("other"),
     db: Session = Depends(get_db),
     user: User = Depends(current_user),
 ):
@@ -139,8 +141,10 @@ async def create_scan(
         raise HTTPException(400, f"Upload at most {MAX_PHOTOS} photos per scan")
     if prepass is None:
         prepass = app_settings.get(db, "vision.prepass_default")
+    if deck_type not in scanner.DECK_TYPES:
+        raise HTTPException(400, f"Deck type must be one of {', '.join(scanner.DECK_TYPES)}")
     job = ScanJob(user_id=user.id, name=name.strip()[:200], prepass=prepass, layout=layout, model=model.strip(),
-                  total_images=len(files))
+                  total_images=len(files), deck_type=deck_type)
     db.add(job)
     db.flush()
     job_dir = _job_dir(job.id)
@@ -169,6 +173,7 @@ class RerunIn(BaseModel):
     prepass: bool | None = None
     layout: str | None = None
     model: str | None = None
+    deck_type: str | None = None
 
 
 @router.post("/{job_id}/rerun")
@@ -183,6 +188,10 @@ def rerun(job_id: int, body: RerunIn, db: Session = Depends(get_db), user: User 
         job.layout = body.layout
     if body.model is not None:
         job.model = body.model.strip()
+    if body.deck_type is not None:
+        if body.deck_type not in scanner.DECK_TYPES:
+            raise HTTPException(400, f"Deck type must be one of {', '.join(scanner.DECK_TYPES)}")
+        job.deck_type = body.deck_type
     job.status = "queued"
     job.deck_id = None
     job.step = "Waiting in queue"
@@ -328,6 +337,21 @@ def add_line(job_id: int, body: LineIn, db: Session = Depends(get_db), user: Use
         job.lines.append(ScanLine(card_id=card.id, raw_name=card.name, qty=body.qty or 1, board=board,
                                   confidence=1.0, flags=[], suggestions=[], detection_ids=[],
                                   accepted=True, user_edited=True))
+    db.commit()
+    return job_detail(db, job)
+
+
+class DeckTypeIn(BaseModel):
+    deck_type: str
+
+
+@router.put("/{job_id}/deck-type")
+def set_deck_type(job_id: int, body: DeckTypeIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """What the photos should add up to. Copy limits follow it from the next read."""
+    job = _job(db, job_id, user)
+    if body.deck_type not in scanner.DECK_TYPES:
+        raise HTTPException(400, f"Deck type must be one of {', '.join(scanner.DECK_TYPES)}")
+    job.deck_type = body.deck_type
     db.commit()
     return job_detail(db, job)
 

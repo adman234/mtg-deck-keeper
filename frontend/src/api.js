@@ -56,6 +56,15 @@ export const BOARDS = [
   { value: "maybe", label: "Maybe" },
 ];
 
+// What a scan's photos should add up to (mirrors DECK_TYPES in backend services/scanner.py).
+export const DECK_TYPES = [
+  { value: "60+15", label: "60-card deck with a 15-card sideboard", main: 60, side: 15, commander: 0 },
+  { value: "60", label: "60-card deck, no sideboard", main: 60, side: 0, commander: 0 },
+  { value: "100", label: "100-card Commander deck (commander in the photos)", main: 99, side: 0, commander: 1, format: "commander" },
+  { value: "99", label: "99-card Commander deck (commander not in the photos)", main: 99, side: 0, commander: 0, format: "commander" },
+  { value: "other", label: "Other" },
+];
+
 export const FORMATS = ["", "standard", "pioneer", "modern", "legacy", "vintage", "pauper", "commander",
   "brawl", "limited", "casual"];
 

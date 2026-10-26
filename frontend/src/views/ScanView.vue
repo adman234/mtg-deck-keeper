@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useRouter } from "vue-router";
-import { api, BOARDS, DOUBT_TEXT, FLAG_TEXT, FORMATS, QTY_FLAGS, fmtDate, methodText, pct } from "../api";
+import { api, BOARDS, DECK_TYPES, DOUBT_TEXT, FLAG_TEXT, FORMATS, QTY_FLAGS, fmtDate, methodText, pct } from "../api";
 import CardSearch from "../components/CardSearch.vue";
 import DebugOverlay from "../components/DebugOverlay.vue";
 
@@ -24,6 +24,7 @@ async function load() {
   try {
     scan.value = await api(`/api/scans/${props.id}`);
     if (!deckName.value) deckName.value = scan.value.name || `Scan #${scan.value.id}`;
+    if (!deckFormat.value) deckFormat.value = deckType.value?.format || "";
   } catch (e) {
     error.value = e.message;
   }
@@ -137,14 +138,50 @@ const groups = computed(() => {
     return out;
   }
   if (onlyFlagged.value) return out;
+  const commanders = rest.filter((l) => l.board === "commander");
+  if (commanders.length) out.push({ key: "commander", title: "Commander", lines: commanders });
   scan.value.images.forEach((img, i) => {
-    const here = rest.filter((l) => places.value.get(l.id)?.photo === i).sort(byPlace);
+    const here = rest.filter((l) => l.board !== "commander" && places.value.get(l.id)?.photo === i).sort(byPlace);
     out.push({ key: `photo-${img.id}`, title: `Photo ${i + 1}`, img, lines: here });
   });
-  const added = rest.filter((l) => !places.value.has(l.id)).sort(byName);
+  const added = rest.filter((l) => l.board !== "commander" && !places.value.has(l.id)).sort(byName);
   if (added.length) out.push({ key: "added", title: "Added by you", lines: added });
   return out;
 });
+// What the photos should add up to, and how the lines compare.
+const deckType = computed(() => DECK_TYPES.find((t) => t.value === (scan.value?.deck_type || "other")) || DECK_TYPES.at(-1));
+const isCommanderDeck = computed(() => deckType.value.format === "commander");
+const expectedTotals = computed(() => {
+  const t = deckType.value;
+  if (t.main == null) return [];
+  return [
+    { board: "main", label: "Main", want: t.main },
+    { board: "side", label: "Sideboard", want: t.side },
+    { board: "commander", label: "Commander", want: t.commander },
+  ].filter((x) => x.want || totals.value[x.board]).map((x) => ({ ...x, have: totals.value[x.board] }));
+});
+const needsCommander = computed(() => deckType.value.value === "100" && !lines.value.some((l) => l.board === "commander"));
+const setDeckType = (value) => act(() => api(`/api/scans/${props.id}/deck-type`, { method: "PUT", body: { deck_type: value } }));
+const toggleCommander = (l) => patch(l, { board: l.board === "commander" ? "main" : "commander" });
+
+// Every title cut-out behind a line (a basic land found ten times has ten).
+const expanded = ref(new Set());
+const titleCrops = (l) => {
+  const out = [];
+  scan.value.images.forEach((img, i) => l.sources.filter((s) => s.image_id === img.id && s.title_url)
+    .forEach((s) => out.push({ url: s.title_url, n: i + 1, read: s.raw_name, exact: s.title_exact })));
+  return out;
+};
+function toggleExpanded(l) {
+  const next = new Set(expanded.value);
+  next.has(l.id) ? next.delete(l.id) : next.add(l.id);
+  expanded.value = next;
+}
+async function openRaw() {
+  if (!raw.value) await toggleRaw();
+  setTimeout(() => document.querySelector(".raw")?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+}
+
 // Accuracy test: the real decklist, and how each read of these photos scored on it.
 const listText = ref("");
 const editingList = ref(false);
@@ -299,6 +336,18 @@ const titleCrop = (l) => l.sources.find((s) => s.title_url && s.title_exact)?.ti
           <span v-if="totals.maybe"><b class="num">{{ totals.maybe }}</b> maybe</span>
           <span :class="flagged ? 'pill warn' : 'pill ok'">{{ flagged ? `${flagged} to review` : "All checked" }}</span>
         </div>
+        <div class="row deck-check">
+          <label class="sort sub small">Deck
+            <select :value="scan.deck_type || 'other'" @change="setDeckType($event.target.value)" aria-label="What the photos hold">
+              <option v-for="t in DECK_TYPES" :key="t.value" :value="t.value">{{ t.label }}</option>
+            </select>
+          </label>
+          <span v-for="t in expectedTotals" :key="t.board" class="pill" :class="t.have === t.want ? 'ok' : 'warn'"
+                :title="t.have === t.want ? 'Adds up' : `Expected ${t.want}`">
+            {{ t.label }} <span class="num">{{ t.have }} / {{ t.want }}</span>
+          </span>
+          <span v-if="needsCommander" class="sub small warn-text">Mark your commander with its “Commander” button.</span>
+        </div>
         <div class="row">
           <label class="sort sub small">Sort
             <select v-model="sortBy" aria-label="Sort lines">
@@ -340,7 +389,7 @@ const titleCrop = (l) => l.sources.find((s) => s.title_url && s.title_exact)?.ti
               <input type="number" min="1" max="999" :value="l.qty" @change="setQty(l, $event.target.value)" :aria-label="`Quantity of ${l.card?.name || l.raw_name}`" />
               <button class="btn small" @click="setQty(l, l.qty + 1)" aria-label="One more">+</button>
             </div>
-            <span v-if="checkQty(l)" class="qty-note">{{ l.flags.includes("over_limit") && !l.accepted ? "Over 4: check it" : "Check the quantity" }}</span>
+            <span v-if="checkQty(l)" class="qty-note">{{ l.flags.includes("over_limit") && !l.accepted ? (isCommanderDeck ? "One copy allowed: check it" : "Over 4: check it") : "Check the quantity" }}</span>
           </div>
 
           <div class="name">
@@ -350,9 +399,20 @@ const titleCrop = (l) => l.sources.find((s) => s.title_url && s.title_exact)?.ti
                 <strong v-else class="unknown" :title="'What the model read'">“{{ l.raw_name }}”</strong>
                 <button class="link" @click="changing = l.id">Change</button>
               </div>
-              <button v-if="titleCrop(l)" class="title-crop" @click="zoom = titleCrop(l)" title="The name as it appears in your photo">
-                <img :src="titleCrop(l)" alt="The card's name in the photo" loading="lazy" />
-              </button>
+              <div v-if="titleCrop(l)" class="row title-row">
+                <button class="title-crop" @click="zoom = titleCrop(l)" title="The name as it appears in your photo">
+                  <img :src="titleCrop(l)" alt="The card's name in the photo" loading="lazy" />
+                </button>
+                <button v-if="titleCrops(l).length > 1" class="link small" @click="toggleExpanded(l)" :aria-expanded="expanded.has(l.id)">
+                  {{ expanded.has(l.id) ? "Hide" : `Show all ${titleCrops(l).length}` }} ▾
+                </button>
+              </div>
+              <div v-if="expanded.has(l.id)" class="title-all">
+                <button v-for="(t, i) in titleCrops(l)" :key="i" class="title-crop" @click="zoom = t.url"
+                        :title="`Photo ${t.n}: read “${t.read}”${t.exact ? '' : ' (approximate box)'}`">
+                  <img :src="t.url" :alt="`Read as ${t.read}`" loading="lazy" />
+                </button>
+              </div>
               <p class="sub small">
                 <span v-if="unsure(l)">No card matches this well · </span>
                 <span v-else-if="!l.card">No matching card · </span>
@@ -391,6 +451,11 @@ const titleCrop = (l) => l.sources.find((s) => s.title_url && s.title_exact)?.ti
           </select>
 
           <div class="actions">
+            <button v-if="isCommanderDeck && l.card" class="btn small" :class="{ primary: l.board === 'commander' }"
+                    @click="toggleCommander(l)" :aria-pressed="l.board === 'commander'"
+                    :title="l.board === 'commander' ? 'Move back to the main deck' : 'Make this your commander'">
+              ★ Commander
+            </button>
             <button v-if="l.needs_review && l.card && !unsure(l)" class="btn small primary" @click="patch(l, { accepted: true })">Looks right</button>
             <button class="btn small danger" @click="removeLine(l)" :aria-label="`Remove ${l.card?.name || l.raw_name}`">Remove</button>
           </div>
@@ -505,7 +570,10 @@ const titleCrop = (l) => l.sources.find((s) => s.title_url && s.title_exact)?.ti
       </section>
 
       <section class="page" style="gap:10px">
-        <h2>Photos</h2>
+        <div class="row" style="justify-content:space-between">
+          <h2>Photos</h2>
+          <button class="btn small" @click="raw ? toggleRaw() : openRaw()">{{ raw ? "Hide raw data" : "Raw data" }}</button>
+        </div>
         <div class="photos">
           <figure v-for="(img, i) in scan.images" :key="img.id">
             <button class="photo" @click="zoom = img.url"><img :src="img.url" :alt="`Photo ${i + 1}`" loading="lazy" /></button>
@@ -602,6 +670,9 @@ const titleCrop = (l) => l.sources.find((s) => s.title_url && s.title_exact)?.ti
 .raw pre { white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 0.8rem; background: var(--bg); padding: 10px; border-radius: 6px; max-height: 320px; overflow: auto; margin: 6px 0 0; }
 .raw-photo { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line); }
 .raw summary { cursor: pointer; font-size: 0.9rem; }
+.title-row { gap: 8px; flex-wrap: nowrap; align-items: center; }
+.title-all { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.deck-check { gap: 8px; }
 .title-crop { padding: 0; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); cursor: zoom-in;
   align-self: flex-start; max-width: 100%; overflow: hidden; line-height: 0; }
 .title-crop img { height: 26px; width: auto; max-width: 100%; object-fit: cover; object-position: left center; display: block; }

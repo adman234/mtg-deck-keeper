@@ -128,52 +128,64 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
     else:
         straight_path(img_row).unlink(missing_ok=True)
 
-    # 1. Whole photo first. When it gives usable boxes, the close-ups re-read each card and pile.
     h, w = img.shape[:2]
     scale = min(1.0, max_side / max(h, w))
     sent = (int(w * scale), int(h * scale))
     reads: list[_Read] = []
-    photo_cards, photo_error, debug = None, None, None
+    photo_cards, photo_error = None, None
+    debug: dict = {"straightened": straight}
     cards: list[vision.ReadCard] = []
+    box_scale = None
     crop_dir, stem = Path(img_row.path).parent / "crops", Path(img_row.path).stem
-    progress.stage("Reading the whole photo")
-    try:
-        cards, reply = await ask_photo(_jpeg_for_model(img, max_side))
-    except vision.VisionError as e:
-        photo_error = str(e)
-        debug = {"error": str(e), "straightened": straight}
-        log.warning("Whole-photo read of %s failed: %s", img_row.filename, e)
-    else:
-        box_scale = piles.place_boxes(cards, sent, (w, h))
-        listed = len(cards)
-        runaway = piles.drop_runaway(cards)
-        debug = {"reply": reply, "sent_size": list(sent), "box_scale": box_scale, "runaway": runaway,
-                 "straightened": straight}
-        # 2. Many small cards: read the full-resolution photo again in overlapping tiles.
-        card_w = float(np.median([min(f.bbox[2:]) for f in outlines])) if outlines else None
-        why = tiles.reason(listed, vision.cut_off(reply), runaway, card_w, w)
-        if zoom and why:
-            tiled, tile_debug = await tiles.read(img, cfg, sem, max_side, listed)
-            debug["tiled"], debug["tiles"] = why, tile_debug
-            if tiled:
-                cards, box_scale = tiled, box_scale or "tiles"
-        cards, duplicates = piles.drop_duplicates(cards)
-        debug["duplicates"] = [{"name": d.name, "count": d.count, "box": d.extra.get("bbox")} for d in duplicates]
+    card_w = float(np.median([min(f.bbox[2:]) for f in outlines])) if outlines else None
+    card_h = float(np.median([max(f.bbox[2:]) for f in outlines])) if outlines else None
 
-    # 3. Cascading columns: OpenCV finds each title bar; each is cut out and read on its own,
-    #    replacing what the whole-photo read listed there.
-    strips: list[vision.ReadCard] = []
+    # 1. Cascading columns (OpenCV, quick): every title bar in them is found and later read on its
+    #    own. A photo with many of them is too crowded for one whole-photo read: go straight to tiles.
+    columns: list[cascades.Column] = []
     if zoom and outlines:
         progress.stage("Looking for cascading columns")
         columns = await asyncio.to_thread(cascades.find, img, [f.corners for f in outlines])
-        if columns:
-            strips = await _read_strips(img, columns, crop_dir, stem, cfg, sem)
-            covered = [np.float32(c.extra["strip"]["corners"]) for c in strips]
-            before = len(cards)
-            cards = [c for c in cards if not _inside_any(c.extra.get("bbox"), covered)]
-            debug = {**(debug or {}), "columns": [{"front": outlines[col.front].bbox, "strips": len(col.strips)}
-                                                  for col in columns],
-                     "replaced_by_strips": before - len(cards)}
+    in_columns = sum(len(c.strips) for c in columns)
+
+    if in_columns >= tiles.CASCADE_TILES:
+        debug["whole_photo"] = f"skipped: {in_columns} title bars found in cascading columns"
+        tiled, tile_debug = await tiles.read(img, cfg, sem, max_side, None, (card_w, card_h))
+        debug["tiled"], debug["tiles"] = "cascading columns found", tile_debug
+        cards, box_scale = tiled, "tiles"
+    else:
+        # 2. Whole photo. When it gives usable boxes, the close-ups re-read each card and pile.
+        progress.stage("Reading the whole photo")
+        try:
+            cards, reply = await ask_photo(_jpeg_for_model(img, max_side))
+        except vision.VisionError as e:
+            photo_error = str(e)
+            debug["error"] = str(e)
+            log.warning("Whole-photo read of %s failed: %s", img_row.filename, e)
+        else:
+            box_scale = piles.place_boxes(cards, sent, (w, h))
+            listed = len(cards)
+            runaway = piles.drop_runaway(cards)
+            debug.update(reply=reply, sent_size=list(sent), box_scale=box_scale, runaway=runaway)
+            # Many small cards: read the full-resolution photo again in overlapping tiles.
+            why = tiles.reason(listed, vision.cut_off(reply), runaway, card_w, w)
+            if zoom and why:
+                tiled, tile_debug = await tiles.read(img, cfg, sem, max_side, listed, (card_w, card_h))
+                debug["tiled"], debug["tiles"] = why, tile_debug
+                if tiled:
+                    cards, box_scale = tiled, box_scale or "tiles"
+    cards, duplicates = piles.drop_duplicates(cards)
+    debug["duplicates"] = [{"name": d.name, "count": d.count, "box": d.extra.get("bbox")} for d in duplicates]
+
+    # 3. Read each title strip of the columns on its own; it replaces what the model listed there.
+    strips: list[vision.ReadCard] = []
+    if columns:
+        strips = await _read_strips(img, columns, crop_dir, stem, cfg, sem)
+        covered = [np.float32(c.extra["strip"]["corners"]) for c in strips]
+        before = len(cards)
+        cards = [c for c in cards if not _inside_any(c.extra.get("bbox"), covered)]
+        debug.update(columns=[{"front": outlines[col.front].bbox, "strips": len(col.strips)} for col in columns],
+                     replaced_by_strips=before - len(cards))
 
     if not photo_error:
         if zoom and box_scale:
@@ -231,7 +243,6 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
         raise vision.VisionError(photo_error)
     if reads:
         progress.stage("Boxing each card's name")
-        card_h = float(np.median([max(f.bbox[2:]) for f in outlines])) if outlines else None
         await asyncio.to_thread(_title_boxes, img, [r.card for r in reads], card_h, crop_dir, stem)
     return _ImageResult(len(found), reads, photo_cards, photo_error, debug)
 
@@ -341,10 +352,25 @@ ANY_NUMBER = {"Relentless Rats", "Shadowborn Apostle", "Rat Colony", "Persistent
 LIMITED_NUMBER = {"Seven Dwarves": 7, "Nazgûl": 9}
 
 
-def copy_limit(name: str | None) -> int | None:
+# What the user said the photos hold. main/side/commander: how many cards each board should end up
+# with (None: not known); singleton: Commander's one copy of each card (basic lands aside).
+DECK_TYPES = {
+    "60+15": {"label": "60-card deck with a 15-card sideboard", "main": 60, "side": 15, "commander": 0},
+    "60": {"label": "60-card deck, no sideboard", "main": 60, "side": 0, "commander": 0},
+    "100": {"label": "100-card Commander deck (commander in the photos)", "main": 99, "side": 0, "commander": 1,
+            "singleton": True, "format": "commander"},
+    "99": {"label": "99-card Commander deck (commander not in the photos)", "main": 99, "side": 0, "commander": 0,
+           "singleton": True, "format": "commander"},
+    "other": {"label": "Other", "main": None, "side": None, "commander": None},
+}
+
+
+def copy_limit(name: str | None, deck_type: str = "other") -> int | None:
     """Most copies a deck may hold, or None when there is no limit."""
     if not name or name in BASIC_LANDS or name in ANY_NUMBER:
         return None
+    if DECK_TYPES.get(deck_type, {}).get("singleton"):
+        return 1 if name not in LIMITED_NUMBER else LIMITED_NUMBER[name]
     return LIMITED_NUMBER.get(name, 4)
 
 
@@ -416,7 +442,7 @@ def build_lines(db: Session, job: ScanJob, threshold: float) -> list[ScanLine]:
         ]
         suggestions = suggestions[:4]
         qty, capped = data["qty"], False
-        limit = copy_limit(names.get(card_id)) if card_id is not None else None
+        limit = copy_limit(names.get(card_id), job.deck_type or "other") if card_id is not None else None
         if limit is not None and qty > limit:
             qty, capped = limit, True
         line = {"card_id": card_id, "name": names.get(card_id), "qty": qty,
