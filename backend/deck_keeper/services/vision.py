@@ -80,14 +80,15 @@ ZOOM_PROMPT = (
     "of the image (English name if you recognise it, otherwise as printed). " + TITLE_HINT + " Count the cards in "
     "this one pile, including the front card. " + COUNT_HINT + " Only count cards stacked under the "
     "front card; cards lying beside it belong to other piles, so ignore them and anything cut off at "
-    "the edges. " + FOUR_HINT + " If no title is visible, return an empty name. "
-    'Format: {"name": ..., "count": ..., "confidence": ...}'
+    "the edges. " + FOUR_HINT + " If no title is visible, return an empty name. Also copy the front "
+    'card\'s type line as printed (e.g. "Creature — Elf Druid", "Land"), or "" if it isn\'t visible. '
+    'Format: {"name": ..., "type": ..., "count": ..., "confidence": ...}'
 )
 ZOOM_SCHEMA = {
     "type": "object",
-    "properties": {"name": {"type": "string"}, "count": {"type": "integer", "minimum": 0},
+    "properties": {"name": {"type": "string"}, "type": {"type": "string"}, "count": {"type": "integer", "minimum": 0},
                    "confidence": {"type": "number", "minimum": 0, "maximum": 1}},
-    "required": ["name", "count", "confidence"],
+    "required": ["name", "type", "count", "confidence"],
 }
 
 CROP_PROMPT = (
@@ -383,6 +384,7 @@ class ZoomRead:
     confidence: float
     raw: str
     retried: bool = False
+    type_line: str = ""  # the front card's type line as read, "" when not visible
 
 
 async def read_pile(cfg: VisionConfig, jpeg: bytes) -> ZoomRead | None:
@@ -436,4 +438,6 @@ async def read_pile(cfg: VisionConfig, jpeg: bytes) -> ZoomRead | None:
     except (TypeError, ValueError):
         conf = 0.5
     conf = conf / 100 if conf > 1 else conf
-    return ZoomRead(name, count if count and count > 0 else None, min(1.0, max(0.0, conf)), text)
+    type_line = re.sub(r"\s+", " ", str(data.get("type") or "")).strip()
+    return ZoomRead(name, count if count and count > 0 else None, min(1.0, max(0.0, conf)), text,
+                    type_line=type_line)

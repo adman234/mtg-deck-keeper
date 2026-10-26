@@ -30,6 +30,11 @@ OVERLAP_GUARD = 0.3
 MIN_SIDE = 0.02  # boxes thinner than this (fraction of the photo) are noise
 DUPLICATE_IOU = 0.6
 ZOOM_MAX_SIDE = 1024
+SIZE_SHORT = 0.85  # a pile's box shorter or narrower than this much of a card is grown to one
+PILE_GROW = 1.1  # (a little more than a card tall: the cards behind stick out)
+SIZE_OFF = 0.3  # a single card's box this far from a card's size is resized
+RUNAWAY = 6  # a run of one name this long at the end of the list may be the model stuck
+RUNAWAY_OVERLAP = 0.2
 SNAP_IOU = 0.3  # a model box and a card OpenCV found overlapping this much are the same card
 SNAP_COVER = 0.7  # or, for a pile, when the found (front) card lies this much inside the box
 ROW_X_OVERLAP = 0.5  # in the same row, a box and a found card overlapping this much across are one card
@@ -212,6 +217,91 @@ def snap_boxes(cards: list[vision.ReadCard], found: list[list[int]],
     used = {j for _, j in pairs}
     return {"found": [list(f) for f in found], "matched_by": matched_by, "snapped": len(pairs), "shifted": shifted,
             "missed": [list(found[j]) for j in range(len(found)) if j not in used]}
+
+
+def fit_sizes(cards: list[vision.ReadCard], found: list[list[int]], photo: tuple[int, int]) -> int:
+    """Give boxes OpenCV couldn't line up a card's size. Cards in one photo are about the same
+    size, but the model often boxes only part of one: the fetchland piles in the lands photo
+    were boxed to their top half. A pile's box grows down (its titles are at the top) and
+    sideways to at least a card; a single card's box much too big or small is resized around its
+    centre. Returns how many boxes changed (they keep the model's box as extra["model_bbox"])."""
+    if len(found) < 2:
+        return 0
+    long = float(np.median([max(f[2], f[3]) for f in found]))
+    short = float(np.median([min(f[2], f[3]) for f in found]))
+    portrait = sum(f[3] >= f[2] for f in found) * 2 >= len(found)
+    cw, ch = (short, long) if portrait else (long, short)
+    W, H = photo
+    changed = 0
+    for c in cards:
+        box = c.extra.get("bbox")
+        if not box or c.extra.get("snapped"):
+            continue
+        x, y, w, h = box
+        if c.count >= 2:
+            if h < SIZE_SHORT * ch:
+                h = ch * PILE_GROW
+            if w < SIZE_SHORT * cw:
+                x, w = x - (cw - w) / 2, cw
+        elif abs(w - cw) > SIZE_OFF * cw or abs(h - ch) > SIZE_OFF * ch:
+            x, y, w, h = x + w / 2 - cw / 2, y + h / 2 - ch / 2, cw, ch
+        else:
+            continue
+        x1, y1 = max(0.0, x), max(0.0, y)
+        x2, y2 = min(float(W), x + w), min(float(H), y + h)
+        new = [round(x1), round(y1), round(x2 - x1), round(y2 - y1)]
+        if new != box:
+            c.extra.setdefault("model_bbox", box)
+            c.extra["bbox"] = new
+            c.extra["resized"] = True
+            changed += 1
+    return changed
+
+
+def _marching(boxes: list[list[int]]) -> bool:
+    """Boxes stepping diagonally by a steady amount, as a stuck model's do. Real copies laid out
+    together form a row or a column."""
+    if len(boxes) < 4:
+        return False
+    steps = np.array([[b[0] - a[0], b[1] - a[1]] for a, b in zip(boxes, boxes[1:])], dtype=float)
+    w, h = float(np.median([b[2] for b in boxes])), float(np.median([b[3] for b in boxes]))
+    diagonal = (np.abs(steps[:, 0]) > 0.1 * w) & (np.abs(steps[:, 1]) > 0.1 * h)
+    return bool(diagonal.mean() >= 0.75)
+
+
+def drop_runaway(cards: list[vision.ReadCard]) -> dict | None:
+    """Small models sometimes get stuck repeating the last name, with boxes sliding off the
+    photo (a 100-card photo ended in ~70 "Coral Reef"). In a long run of one name at the end of
+    the list, drop the entries with no box, those squeezed against the photo's edge, and those
+    overlapping one already kept."""
+    run = 0
+    last = matching.normalize(cards[-1].name) if cards else ""
+    for c in reversed(cards):
+        if matching.normalize(c.name) != last:
+            break
+        run += 1
+    if run < RUNAWAY:
+        return None
+    tail = cards[-run:]
+    boxed = [c.extra["bbox"] for c in tail if c.extra.get("bbox")]
+    if boxed:
+        mw, mh = float(np.median([b[2] for b in boxed])), float(np.median([b[3] for b in boxed]))
+    keep: list[vision.ReadCard] = []
+    for c in tail:
+        b = c.extra.get("bbox")
+        if not b or b[2] < 0.6 * mw or b[3] < 0.6 * mh:
+            continue
+        # Separate copies of one card don't overlap; a stuck model's boxes step across the photo.
+        if any(_iou(b, k.extra["bbox"]) > RUNAWAY_OVERLAP for k in keep):
+            continue
+        keep.append(c)
+    if _marching([k.extra["bbox"] for k in keep]):
+        keep = keep[:1]
+    dropped = run - len(keep)
+    if not dropped:
+        return None
+    cards[len(cards) - run:] = keep
+    return {"name": tail[0].name, "dropped": dropped}
 
 
 def drop_duplicates(cards: list[vision.ReadCard]) -> tuple[list[vision.ReadCard], list[vision.ReadCard]]:

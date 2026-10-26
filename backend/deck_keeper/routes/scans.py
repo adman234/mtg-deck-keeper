@@ -55,6 +55,7 @@ def line_out(line: ScanLine, dets: dict[int, Detection], job_id: int) -> dict:
             "qty": d.qty, "model_confidence": d.model_confidence, "match_score": d.match_score,
             "match_method": d.match_method, "bbox": d.bbox,
             "used": (d.raw or {}).get("used"),
+            "doubts": (d.raw or {}).get("doubts", []), "type_read": (d.raw or {}).get("type_read"),
             "set": d.raw_set, "collector_number": d.raw_number,
             "crop_url": f"/api/scans/{job_id}/crops/{d.id}" if d.crop_path else None,
         })
@@ -73,7 +74,7 @@ def job_detail(db: Session, job: ScanJob) -> dict:
         "threshold": app_settings.get(db, "vision.confidence_threshold"),
         "images": [{"id": i.id, "filename": i.filename, "width": i.width, "height": i.height,
                     "crops_found": i.crops_found, "photo_cards": i.photo_cards, "photo_error": i.photo_error,
-                    "board": i.board,
+                    "board": i.board, "runaway": (i.debug or {}).get("runaway"),
                     "unconfirmed_crops": sum(1 for d in i.detections if d.match_method == "unconfirmed"),
                     "url": f"/api/scans/{job.id}/photos/{i.id}"} for i in job.images],
         "lines": [line_out(ln, dets, job.id) for ln in job.lines],

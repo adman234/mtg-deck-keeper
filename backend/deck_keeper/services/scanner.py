@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from .. import app_settings
 from ..db import session_scope
 from ..models import Card, Detection, ScanImage, ScanJob, ScanLine
-from . import detection, matching, piles, resolver, scryfall, vision
+from . import detection, evidence, matching, piles, resolver, scryfall, vision
 
 log = logging.getLogger(__name__)
 
@@ -111,13 +111,15 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
         log.warning("Whole-photo read of %s failed: %s", img_row.filename, e)
     else:
         box_scale = piles.place_boxes(cards, sent, (w, h))
+        runaway = piles.drop_runaway(cards)
         cards, duplicates = piles.drop_duplicates(cards)
-        debug = {"reply": reply, "sent_size": list(sent), "box_scale": box_scale,
+        debug = {"reply": reply, "sent_size": list(sent), "box_scale": box_scale, "runaway": runaway,
                  "duplicates": [{"name": d.name, "count": d.count, "box": d.extra.get("bbox")} for d in duplicates]}
         if zoom and box_scale:
             # The model's boxes are rough; line them up with the cards OpenCV can find (no model calls).
             outlines = await asyncio.to_thread(detection.find_cards, img)
             debug["snap"] = piles.snap_boxes(cards, [f.bbox for f in outlines], [f.corners for f in outlines])
+            debug["snap"]["resized"] = piles.fit_sizes(cards, [f.bbox for f in outlines], (w, h))
             await asyncio.to_thread(piles.count_fans, img, cards)
             await piles.zoom_in(img, cards, Path(img_row.path).parent / "crops", Path(img_row.path).stem, cfg, sem)
             if index is not None:
@@ -151,6 +153,32 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
     elif photo_error:
         raise vision.VisionError(photo_error)
     return _ImageResult(len(found), reads, photo_cards, photo_error, debug)
+
+
+def _doubts(index: matching.CardIndex, card: vision.ReadCard, res: resolver.Resolution) -> list[str]:
+    """Small reasons to trust a whole-photo entry's final name a little less (see evidence.py)."""
+    out = []
+    zoom: vision.ZoomRead | None = card.extra.get("zoom")
+    if zoom and zoom.retried:
+        out.append("title_retry")
+    hits = [h[0] for h in (index.match(card.name, limit=1), index.match(zoom.name if zoom else "", limit=1)) if h]
+    if len(hits) == 2 and min(h.score for h in hits) >= SURE_MATCH and hits[0].card_id != hits[1].card_id:
+        out.append("reads_disagree")
+    if card.extra.get("tiebreak") or res.method == "choice":
+        out.append("model_chose")
+    return out
+
+
+async def _check_types(db: Session, job: ScanJob) -> None:
+    """Compare the type line each close-up read with the matched card's real type."""
+    dets = [d for img in job.images for d in img.detections if d.card_id and "type_read" in (d.raw or {})]
+    if not dets:
+        return
+    await scryfall.fetch_details(db, list(db.scalars(select(Card).where(Card.id.in_({d.card_id for d in dets})))))
+    for d in dets:
+        result = evidence.type_check(d.raw["type_read"], db.get(Card, d.card_id).type_line)
+        if result in evidence.DOUBTS:
+            d.raw = {**d.raw, "doubts": [*d.raw.get("doubts", []), result]}
 
 
 UNCONFIRMED_CONFIDENCE = 0.4  # name only from the whole-table read; the close-up saw no title
@@ -190,6 +218,8 @@ def _flags_for(line: dict, threshold: float) -> list[str]:
         flags.append("unmatched")
     elif line["confidence"] < threshold or line.get("match_score", 100) < SURE_MATCH:
         flags.append("low_confidence")
+    if line.get("type_mismatch"):
+        flags.append("type_mismatch")
     if line.get("disagree"):
         flags.append("count_mismatch")
     if line.get("capped"):
@@ -233,7 +263,8 @@ def build_lines(db: Session, job: ScanJob, threshold: float) -> list[ScanLine]:
     for (key, board), data in agg.items():
         dets: list[Detection] = data["dets"]
         best = max(dets, key=lambda d: d.model_confidence * d.match_score)
-        conf = min(d.model_confidence * (d.match_score / 100 if d.card_id else 0) for d in dets)
+        conf = min(d.model_confidence * (d.match_score / 100 if d.card_id else 0)
+                   * evidence.factor((d.raw or {}).get("doubts", [])) for d in dets)
         card_id = key if not isinstance(key, tuple) else None
         if card_id is not None and card_id not in names:
             names[card_id] = db.get(Card, card_id).name
@@ -254,6 +285,7 @@ def build_lines(db: Session, job: ScanJob, threshold: float) -> list[ScanLine]:
             qty, capped = limit, True
         line = {"card_id": card_id, "name": names.get(card_id), "qty": qty,
                 "confidence": round(conf, 3), "disagree": data["disagree"], "capped": capped,
+                "type_mismatch": any("type_mismatch" in (d.raw or {}).get("doubts", []) for d in dets),
                 "match_score": max(d.match_score for d in dets)}
         lines.append(ScanLine(
             job_id=job.id,
@@ -329,6 +361,7 @@ async def process_job(job_id: int) -> None:
                                "count_differs": choice.count_differs,
                                "unsure": choice.unsure, "zoom_region": r.card.extra.get("zoom_region"),
                                "model_box": r.card.extra.get("model_bbox"), "snapped": r.card.extra.get("snapped"),
+                               "resized": r.card.extra.get("resized"),
                                "shifted": r.card.extra.get("shifted"), "tiebreak": r.card.extra.get("tiebreak"),
                                "fan": (fan := r.card.extra.get("fan")) and {"count": fan.count, "direction": fan.direction,
                                                                             "edges": fan.edges},
@@ -361,6 +394,10 @@ async def process_job(job_id: int) -> None:
                         res.card_id = None
                     if r.source == "photo" and choice.suggest:
                         raw["suggest"] = choice.suggest
+                    if r.source == "photo":
+                        raw["doubts"] = _doubts(matching.get_index(db), r.card, res)
+                        if zoom:
+                            raw["type_read"] = zoom.type_line
                     img.detections.append(Detection(
                         source=r.source, crop_path=r.crop_path, bbox=r.bbox,
                         raw_name=card.name[:255], raw_set=(r.card.set or "")[:20] or None,
@@ -376,6 +413,9 @@ async def process_job(job_id: int) -> None:
                             d.match_method = "unconfirmed"
                 job.processed_images = n
                 db.commit()
+            job.step = "Checking card types"
+            db.commit()
+            await _check_types(db, job)
             job.step = "Building decklist"
             db.flush()
             lines = build_lines(db, job, vs["confidence_threshold"])

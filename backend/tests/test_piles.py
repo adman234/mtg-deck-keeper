@@ -520,3 +520,43 @@ def test_repeated_name_with_unreadable_close_up_is_left_to_the_user(admin):
     assert len(unmatched) == 1 and "unmatched" in unmatched[0]["flags"]
     assert [s["name"] for s in unmatched[0]["suggestions"]][:1] == ["Bayou"]
     assert not any(ln["card"] and ln["card"]["name"] == "Meticulous Artisan" for ln in lines)
+
+
+def test_stuck_model_repeating_one_name_is_cut_off():
+    """Scan 15 (a 100-card photo): the reply ended in ~70 "Coral Reef", some without boxes, the
+    rest stepping diagonally across the photo and off its edge."""
+    real = [_card(n, count=1) for n in ("Scapeshift", "Edge of Autumn", "Coral Reef")]
+    for i, c in enumerate(real):
+        c.extra["bbox"] = [100, 100 + i * 120, 320, 110]
+    stuck = []
+    for i in range(30):
+        c = _card("Coral Reef", count=1)
+        if i < 12:
+            x = 1248 + i * 82
+            c.extra["bbox"] = [x, 734 + i * 47, min(312, 2400 - x), 181]
+        stuck.append(c)
+    cards = real + stuck
+    out = piles.drop_runaway(cards)
+    assert out == {"name": "Coral Reef", "dropped": 30}  # the run includes the real one: it stays
+    assert [c.name for c in cards] == ["Scapeshift", "Edge of Autumn", "Coral Reef"]
+
+
+def test_a_row_of_basic_lands_is_not_a_runaway():
+    row = [_card("Forest", count=1) for _ in range(8)]
+    for i, c in enumerate(row):
+        c.extra["bbox"] = [100 + i * 260, 300, 250, 350]
+    assert piles.drop_runaway(row) is None and len(row) == 8
+
+
+def test_boxes_are_given_a_cards_size():
+    """Lands photo: the fetchland piles were boxed to their top half."""
+    found = [[413, 64, 297, 364], [701, 65, 287, 363], [989, 69, 281, 361], [986, 430, 294, 402]]
+    pile, single, fine = _card("Windswept Heath", count=2), _card("Forest", count=1), _card("Bayou", count=1)
+    pile.extra["bbox"], single.extra["bbox"], fine.extra["bbox"] = [150, 900, 320, 180], [700, 430, 500, 600], [1272, 430, 290, 370]
+    assert piles.fit_sizes([pile, single, fine], found, (2000, 1506)) == 2
+    assert pile.extra["bbox"][1] == 900 and pile.extra["bbox"][3] >= 363  # grown down to a card
+    assert pile.extra["model_bbox"] == [150, 900, 320, 180]
+    x, y, w, h = single.extra["bbox"]
+    assert abs(w - 290) <= 1 and abs(h - 363) <= 1  # a typical card's size...
+    assert abs(x + w / 2 - 950) <= 1 and abs(y + h / 2 - 730) <= 1  # ...around the same centre
+    assert "resized" not in fine.extra

@@ -62,6 +62,16 @@ export const FORMATS = ["", "standard", "pioneer", "modern", "legacy", "vintage"
 export const FLAG_TEXT = {
   unmatched: "No matching card",
   low_confidence: "Low confidence",
+  type_mismatch: "Type doesn't match",
+};
+
+// Small doubts that lowered a line's confidence (see backend services/evidence.py).
+export const DOUBT_TEXT = {
+  type_mismatch: "the type line read doesn't fit this card",
+  type_unchecked: "its type line couldn't be read to double-check",
+  reads_disagree: "the whole-photo read named a different card",
+  model_chose: "the model had to pick between similar cards",
+  title_retry: "the first close-up missed the title",
 };
 
 const LANGUAGES = { de: "German", fr: "French", it: "Italian", es: "Spanish", pt: "Portuguese", ja: "Japanese",

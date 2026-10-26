@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useRouter } from "vue-router";
-import { api, BOARDS, FLAG_TEXT, FORMATS, QTY_FLAGS, fmtDate, methodText, pct } from "../api";
+import { api, BOARDS, DOUBT_TEXT, FLAG_TEXT, FORMATS, QTY_FLAGS, fmtDate, methodText, pct } from "../api";
 import CardSearch from "../components/CardSearch.vue";
 import DebugOverlay from "../components/DebugOverlay.vue";
 
@@ -169,6 +169,12 @@ function choose(l, c) {
   if (l.card && c.card_id === l.card.id) patch(l, { accepted: true });
   else pickCard(l, { id: c.card_id });
 }
+const doubts = (l) => [...new Set(l.sources.flatMap((s) => s.doubts || []))].filter((d) => DOUBT_TEXT[d]);
+const confTitle = (l) => {
+  const why = doubts(l).map((d) => DOUBT_TEXT[d]);
+  return "Model confidence × name match" + (why.length ? `. Lower because ${why.join("; ")}.` : "");
+};
+const typeRead = (l) => l.sources.find((s) => (s.doubts || []).includes("type_mismatch"))?.type_read;
 const checkQty = (l) => !l.accepted && l.flags.some((f) => QTY_FLAGS.includes(f));
 const pillFlags = (l) => l.flags.filter((f) => !QTY_FLAGS.includes(f));
 const confClass = (l) => unsure(l) ? "warn" : confClassRaw(l);
@@ -321,6 +327,8 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
                 <span v-else>Added by you</span>
               </p>
               <p v-if="l.card && !unsure(l) && how(l)" class="sub small how">{{ how(l) }}</p>
+              <p v-if="typeRead(l) && !l.accepted" class="sub small warn-text">Its type line reads “{{ typeRead(l) }}”{{ l.card?.type_line ? `, but ${l.card.name} is ${l.card.type_line}` : "" }}.</p>
+              <p v-else-if="doubts(l).length && l.needs_review && !l.accepted" class="sub small">Less sure because {{ doubts(l).map((d) => DOUBT_TEXT[d]).join("; ") }}.</p>
               <div v-if="pillFlags(l).length && !l.accepted && !unsure(l) && l.card" class="row" style="gap:6px">
                 <span v-for="f in pillFlags(l)" :key="f" class="pill warn">{{ FLAG_TEXT[f] || f }}</span>
               </div>
@@ -336,7 +344,7 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
           </div>
 
           <span v-if="l.user_edited" class="pill conf ok" title="You picked or adjusted this line">Edited</span>
-          <span v-else class="pill conf" :class="confClass(l)" title="Model confidence × name match">{{ l.card ? pct(l.confidence) : "?" }}</span>
+          <span v-else class="pill conf" :class="confClass(l)" :title="confTitle(l)">{{ l.card ? pct(l.confidence) : "?" }}</span>
 
           <select :value="l.board" @change="patch(l, { board: $event.target.value })" aria-label="Board">
             <option v-for="b in BOARDS" :key="b.value" :value="b.value">{{ b.label }}</option>
@@ -424,6 +432,7 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
               <span v-if="img.crops_found"> · {{ img.crops_found }} cut out (fallback)</span>
               <span v-if="img.photo_cards != null"> · {{ img.photo_cards }} listed from whole photo</span>
               <span v-if="img.photo_error" class="warn-text"> · whole-photo read failed</span>
+              <span v-if="img.runaway" class="warn-text"> · the model got stuck repeating “{{ img.runaway.name }}”; {{ img.runaway.dropped }} of those ignored</span>
               <span v-if="img.unconfirmed_crops"> · {{ img.unconfirmed_crops }} unreadable cut-out{{ img.unconfirmed_crops === 1 ? "" : "s" }} ignored</span>
             </figcaption>
             <label class="sub small photo-board">Cards in this photo go to
