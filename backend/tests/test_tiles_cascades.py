@@ -238,21 +238,27 @@ def test_many_title_bars_in_columns_skip_the_whole_photo_read(admin):
     scryfall.transport = httpx.MockTransport(lambda r: httpx.Response(404, json={}))
     admin.put("/api/admin/settings", json={"values": {"vision.model": "daily"}})
 
-    def scan():
+    def scan(deck_type="other", photos=1):
         prompts.clear()
-        job_id = admin.post("/api/scans", files=[("files", ("a.jpg", jpeg, "image/jpeg"))]).json()["id"]
+        job_id = admin.post("/api/scans", data={"deck_type": deck_type},
+                            files=[("files", (f"{k}.jpg", jpeg, "image/jpeg")) for k in range(photos)]).json()["id"]
         asyncio.run(scanner.process_job(job_id))
         return admin.get(f"/api/scans/{job_id}").json(), admin.get(f"/api/scans/{job_id}/debug").json()["images"][0]
 
-    # By default the titles in the columns and the outlined front card are all that's read.
-    detail, raw = scan()
+    # A 60-card deck in 4 photos: the 18 cards found here are about this photo's share, so the
+    # titles in the columns and the outlined front card are all that's read.
+    detail, raw = scan("60", photos=4)
     assert "whole" not in prompts and "tile" not in prompts
     assert raw["whole_photo"].startswith("skipped") and raw["columns"][0]["strips"] == n - 1
-    assert sum(ln["qty"] for ln in detail["lines"]) == n  # the front card got its close-up
+    assert sum(ln["qty"] for ln in detail["lines"]) == 4 * n  # each front card got its close-up
 
-    # The setting reads the photo in tiles as well, for cards outside the columns.
+    # A 100-card deck in one photo: most of it wasn't found in columns, so tiles are read too.
+    detail, raw = scan("100")
+    assert "tile" in prompts and raw["tiled"] == f"the columns hold {n} of about 100 cards"
+
+    # The setting reads the photo in tiles whenever there are columns.
     admin.put("/api/admin/settings", json={"values": {"vision.tiles_with_columns": True}})
-    detail, raw = scan()
+    detail, raw = scan("60", photos=4)
     assert "whole" not in prompts and "tile" in prompts
 
 
@@ -285,3 +291,4 @@ def test_a_strip_is_read_from_its_title_bar_then_whole(tmp_path, monkeypatch):
     out = asyncio.run(scanner._read_strips(img, cols, tmp_path, "p", cfg, asyncio.Semaphore(1)))
     assert [c.name for c in out] == ["Lightning Bolt"] and len(seen) == 2
     assert out[0].extra["strip"]["bar"] is not None  # the bar was found, and is the name box
+

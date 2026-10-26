@@ -36,6 +36,7 @@ FRONT_WEIGHT = 4  # the outlined front card counts as this many strips in that l
 SIDE_ROWS = 0.12  # its sides are looked for in this much of the strip, from the top (title bar height)
 SLEEVE = (0.97, 1.12)  # a card's sides are this far apart, or its sleeve's
 SIDE_EDGES = 0.9  # the two sides together must be at least this strong (each strongest is 1)
+INTO_OTHER = 0.25  # a strip this much over another card lying whole has left its column
 SPLIT = 1.6  # a strip this many times the column's usual height holds two cards
 SAME_REACH = 0.1  # walks up a column ending this close (of the longer) got about as far
 BORROWED = 3  # edges taken from other columns to try on a column whose front card looks different
@@ -278,6 +279,14 @@ def _line_up(gray: np.ndarray, spans: list[tuple[int, int]], lefts: list[int], f
     return out
 
 
+def _covered(box: list[int], outline: np.ndarray) -> float:
+    """How much of a box lies inside a card's outline (by their bounding boxes)."""
+    ox, oy, ow, oh = cv2.boundingRect(outline.astype(np.float32))
+    w = min(box[0] + box[2], ox + ow) - max(box[0], ox)
+    h = min(box[1] + box[3], oy + oh) - max(box[1], oy)
+    return max(0, w) * max(0, h) / max(1, box[2] * box[3])
+
+
 def _split_tall(below: int, edges: list[tuple[int, int, float]]) -> list[tuple[int, int, float]]:
     """A strip about twice the column's usual height holds two cards: the walk missed the edge
     between them (scan 19: Cavern of Souls and Panharmonicon in one strip). Split it evenly; each
@@ -339,6 +348,7 @@ def find(img: np.ndarray, found: list[list[list[float]]]) -> list[Column]:
             continue
         inv = np.linalg.inv(views[i][1])
         front = np.float32(found[i]).reshape(-1, 1, 2)
+        others = [np.float32(c).reshape(-1, 1, 2) for j, c in enumerate(found) if j != i]
         col = Column(i)
         vgray = cv2.cvtColor(views[i][0], cv2.COLOR_BGR2GRAY)
         edges = _split_tall(below, edges)
@@ -358,6 +368,11 @@ def find(img: np.ndarray, found: list[list[list[float]]]) -> list[Column]:
                 # front card is read whole, so this would count it twice (scan 18).
                 below = top
                 continue
+            box = [int(x1), int(y1), int(x2 - x1), int(y2 - y1)]
+            if any(_covered(box, o) > INTO_OTHER for o in others):
+                # The walk has run into another card lying whole: the front of a column in a row
+                # above (scan 16). This column ends below it.
+                break
             col.strips.append(Strip(pts.tolist(), [int(x1), int(y1), int(x2 - x1), int(y2 - y1)], round(score, 2),
                                     title.round(1).tolist()))
             below = top

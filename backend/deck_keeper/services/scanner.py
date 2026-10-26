@@ -99,7 +99,7 @@ class _ImageResult:
 async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionConfig,
                          sem: asyncio.Semaphore, max_side: int, layout: str = "piles",
                          zoom: bool = True, index: matching.CardIndex | None = None,
-                         tiles_with_columns: bool = False) -> _ImageResult:
+                         tiles_with_columns: bool = False, expect: int | None = None) -> _ImageResult:
     img = await asyncio.to_thread(cv2.imread, img_row.path)
     if img is None:
         raise vision.VisionError(f"Could not open {img_row.filename}")
@@ -151,13 +151,20 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
 
     if in_columns >= tiles.CASCADE_TILES:
         debug["whole_photo"] = f"skipped: {in_columns} title bars found in cascading columns"
-        if tiles_with_columns:
+        # Every title in the columns is read on its own and every outlined card gets a close-up.
+        # When that's about the whole deck, reading tiles as well only costs time (scan 19: 150 of
+        # 240 s, for one more card). Otherwise some columns weren't found (scan 16: three front
+        # cards with no outline, 38 cards), and the tiles read them.
+        found_here = in_columns + len(outlines)
+        complete = expect is not None and found_here >= COLUMNS_COMPLETE * expect
+        if tiles_with_columns or not complete:
             tiled, tile_debug = await tiles.read(img, cfg, sem, max_side, None, (card_w, card_h))
-            debug["tiled"], debug["tiles"] = "cascading columns found", tile_debug
+            debug["tiled"] = ("cascading columns found" if tiles_with_columns else
+                              f"the columns hold {found_here} of about {expect} cards" if expect else
+                              "cascading columns found; deck size not given")
+            debug["tiles"] = tile_debug
             cards, box_scale = tiled, "tiles"
         else:
-            # Every title in the columns is read on its own and every outlined card gets a close-up:
-            # reading tiles as well took 150 of 240 s and found one more card (scan 19).
             cards, box_scale = [], "columns"
     else:
         # 2. Whole photo. When it gives usable boxes, the close-ups re-read each card and pile.
@@ -384,6 +391,7 @@ def _unconfirmed(det: Detection, photo_card_ids: set[int]) -> bool:
 SURE_MATCH = 85.0  # below this the "match" is only the nearest spelling
 SAME_CARD_REACH = 0.5  # of a card's height: an entry and a strip this close, reading the same name, are one card
 ACCEPT_MATCH = 80.0  # below this it isn't taken at all ("Force of One" is not Forest)
+COLUMNS_COMPLETE = 0.85  # columns and outlined cards holding this much of a photo's share of the deck: no tiles
 BAR_READ_H = 120  # px: a title bar is cut out this tall for the model to read
 SHORT_READ, SHORT_ACCEPT = 6, 90.0  # a read this short is a scrap of a name: it must match closer ("Ring" is not Spring)
 
@@ -561,13 +569,16 @@ async def process_job(job_id: int) -> None:
                     ) from e
                 index = matching.get_index(db)
             progress.start(job.id, len(job.images))
+            size = DECK_TYPES.get(job.deck_type or "other", {})
+            total = sum(size.get(k) or 0 for k in ("main", "side", "commander"))
+            expect = round(total / len(job.images)) if total and job.images else None
             for n, img in enumerate(job.images, start=1):
                 job.step = f"Reading photo {n} of {len(job.images)}"
                 progress.photo(n)
                 db.commit()
                 result = await _process_image(img, job.prepass, cfg, sem, vs["image_max_side"], job.layout,
                                               vs["pile_zoom"], matching.get_index(db),
-                                              vs["tiles_with_columns"])
+                                              vs["tiles_with_columns"], expect)
                 img.crops_found, img.photo_cards, img.photo_error = result.crops, result.photo_cards, result.photo_error
                 img.debug = result.debug
                 reads = result.reads
