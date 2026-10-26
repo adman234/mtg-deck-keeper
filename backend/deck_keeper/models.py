@@ -112,6 +112,8 @@ class ScanImage(Base):
     # Result of reading the whole photo: number of cards listed, or why it failed.
     photo_cards: Mapped[int | None] = mapped_column(Integer)
     photo_error: Mapped[str | None] = mapped_column(Text)
+    # Raw-data view: the model's whole-photo reply, box scale used, entries dropped as duplicates.
+    debug: Mapped[dict | None] = mapped_column(JSON)
     detections: Mapped[list["Detection"]] = relationship(cascade="all, delete-orphan", order_by="Detection.id")
 
 
@@ -134,6 +136,8 @@ class Detection(Base):
     # How the card was identified: name | printing | foreign:<lang> | alias | choice,
     # or 'unconfirmed' for a weak crop read the whole-photo pass didn't back up (not counted).
     match_method: Mapped[str | None] = mapped_column(String(20))
+    # Raw-data view: what each read said ({"photo": entry, "zoom": {...}, "used": ...}).
+    raw: Mapped[dict | None] = mapped_column(JSON)
 
 
 class Lookup(Base):

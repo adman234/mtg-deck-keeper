@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from .. import app_settings
 from ..db import session_scope
 from ..models import Card, Detection, ScanImage, ScanJob, ScanLine
-from . import detection, matching, resolver, scryfall, vision
+from . import detection, matching, piles, resolver, scryfall, vision
 
 log = logging.getLogger(__name__)
 
@@ -79,10 +79,12 @@ class _ImageResult:
     reads: list[_Read]
     photo_cards: int | None  # None when the whole-photo read failed
     photo_error: str | None
+    debug: dict | None = None
 
 
 async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionConfig,
-                         sem: asyncio.Semaphore, max_side: int, layout: str = "piles") -> _ImageResult:
+                         sem: asyncio.Semaphore, max_side: int, layout: str = "piles",
+                         zoom: bool = True) -> _ImageResult:
     img = await asyncio.to_thread(cv2.imread, img_row.path)
     if img is None:
         raise vision.VisionError(f"Could not open {img_row.filename}")
@@ -90,6 +92,10 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
     async def ask(jpeg: bytes, single: bool) -> list[vision.ReadCard]:
         async with sem:
             return await vision.read_cards(cfg, jpeg, single, layout)
+
+    async def ask_photo(jpeg: bytes) -> tuple[list[vision.ReadCard], str]:
+        async with sem:
+            return await vision.read_cards_raw(cfg, jpeg, False, layout)
 
     tasks: list[tuple[str, str | None, list[int] | None, asyncio.Task]] = []
     found: list[detection.FoundCard] = []
@@ -104,26 +110,39 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
             tasks.append(("crop", str(crop_path), fc.bbox, asyncio.create_task(ask(jpeg, True))))
     # Always read the whole photo too: it catches cards the detector missed (fanned,
     # overlapping) and gives a second opinion on counts.
-    tasks.append(("photo", None, None, asyncio.create_task(ask(_jpeg_for_model(img, max_side), False))))
+    h, w = img.shape[:2]
+    scale = min(1.0, max_side / max(h, w))
+    sent = (int(w * scale), int(h * scale))
+    tasks.append(("photo", None, None, asyncio.create_task(ask_photo(_jpeg_for_model(img, max_side)))))
 
     reads: list[_Read] = []
     errors: list[Exception] = []
-    photo_cards, photo_error = None, None
+    photo_cards, photo_error, debug = None, None, None
     for source, crop_path, bbox, task in tasks:
         try:
-            cards = await task
+            result = await task
         except vision.VisionError as e:
             errors.append(e)
             if source == "photo":
                 photo_error = str(e)
+                debug = {"error": str(e)}
                 log.warning("Whole-photo read of %s failed: %s", img_row.filename, e)
             continue
-        if source == "photo":
-            photo_cards = len(cards)
-        reads.extend(_Read(source, crop_path, bbox, rc) for rc in cards)
+        if source != "photo":
+            reads.extend(_Read(source, crop_path, bbox, rc) for rc in result)
+            continue
+        cards, reply = result
+        box_scale = piles.place_boxes(cards, sent, (w, h))
+        cards, duplicates = piles.drop_duplicates(cards)
+        if zoom and box_scale:
+            await piles.zoom_in(img, cards, Path(img_row.path).parent / "crops", Path(img_row.path).stem, cfg, sem)
+        photo_cards = len(cards)
+        debug = {"reply": reply, "sent_size": list(sent), "box_scale": box_scale,
+                 "duplicates": [{"name": d.name, "count": d.count, "box": d.extra.get("bbox")} for d in duplicates]}
+        reads.extend(_Read("photo", c.extra.get("crop_path"), c.extra.get("bbox"), c) for c in cards)
     if errors and len(errors) == len(tasks):
         raise errors[0]
-    return _ImageResult(len(found), reads, photo_cards, photo_error)
+    return _ImageResult(len(found), reads, photo_cards, photo_error, debug)
 
 
 WEAK_CROP_SCORE = 85.0
@@ -138,14 +157,33 @@ def _unconfirmed(det: Detection, photo_card_ids: set[int]) -> bool:
     return det.card_id is None or det.match_score < WEAK_CROP_SCORE or det.model_confidence < WEAK_CROP_CONFIDENCE
 
 
+SURE_MATCH = 85.0  # below this the "match" is only the nearest spelling
+
+# Constructed decks allow at most 4 copies of a card, except basic lands and cards that
+# say otherwise. Counts above the limit are almost always a miscounted pile.
+ANY_NUMBER = {"Relentless Rats", "Shadowborn Apostle", "Rat Colony", "Persistent Petitioners",
+              "Dragon's Approach", "Slime Against Humanity", "Hare Apparent", "Templar Knight",
+              "Tempest Hawk"}
+LIMITED_NUMBER = {"Seven Dwarves": 7, "Nazgûl": 9}
+
+
+def copy_limit(name: str | None) -> int | None:
+    """Most copies a deck may hold, or None when there is no limit."""
+    if not name or name in BASIC_LANDS or name in ANY_NUMBER:
+        return None
+    return LIMITED_NUMBER.get(name, 4)
+
+
 def _flags_for(line: dict, threshold: float) -> list[str]:
     flags = []
     if line["card_id"] is None:
         flags.append("unmatched")
-    elif line["confidence"] < threshold:
+    elif line["confidence"] < threshold or line.get("match_score", 100) < SURE_MATCH:
         flags.append("low_confidence")
     if line.get("disagree"):
         flags.append("count_mismatch")
+    if line.get("capped"):
+        flags.append("over_limit")
     if line.get("name") in BASIC_LANDS and line["qty"] > 4:
         flags.append("check_basic_count")
     return flags
@@ -176,7 +214,7 @@ def build_lines(db: Session, job: ScanJob, threshold: float) -> list[ScanLine]:
             line = agg.setdefault(key, {"qty": 0, "dets": [], "disagree": False})
             line["qty"] += max(c, p)
             line["dets"].extend(dets)
-            if c and p and c != p:
+            if (c and p and c != p) or any((d.raw or {}).get("count_differs") for d in dets):
                 line["disagree"] = True
 
     lines = []
@@ -191,13 +229,18 @@ def build_lines(db: Session, job: ScanJob, threshold: float) -> list[ScanLine]:
             {"card_id": m.card_id, "name": m.name, "score": m.score}
             for m in index.match(best.raw_name, limit=4) if m.card_id != card_id and m.score >= matching.MIN_SCORE
         ][:3]
-        line = {"card_id": card_id, "name": names.get(card_id), "qty": data["qty"],
-                "confidence": round(conf, 3), "disagree": data["disagree"]}
+        qty, capped = data["qty"], False
+        limit = copy_limit(names.get(card_id)) if card_id is not None else None
+        if limit is not None and qty > limit:
+            qty, capped = limit, True
+        line = {"card_id": card_id, "name": names.get(card_id), "qty": qty,
+                "confidence": round(conf, 3), "disagree": data["disagree"], "capped": capped,
+                "match_score": max(d.match_score for d in dets)}
         lines.append(ScanLine(
             job_id=job.id,
             card_id=card_id,
             raw_name=best.raw_name,
-            qty=data["qty"],
+            qty=qty,
             board="main",
             confidence=line["confidence"],
             flags=_flags_for(line, threshold),
@@ -224,7 +267,7 @@ async def process_job(job_id: int) -> None:
         for img in job.images:
             img.detections.clear()
             img.crops_found = 0
-            img.photo_cards = img.photo_error = None
+            img.photo_cards = img.photo_error = img.debug = None
         job.lines.clear()
         db.commit()
         sem = asyncio.Semaphore(max(1, vs["max_concurrency"]))
@@ -250,20 +293,34 @@ async def process_job(job_id: int) -> None:
             for n, img in enumerate(job.images, start=1):
                 job.step = f"Reading photo {n} of {len(job.images)}"
                 db.commit()
-                result = await _process_image(img, job.prepass, cfg, sem, vs["image_max_side"], job.layout)
+                result = await _process_image(img, job.prepass, cfg, sem, vs["image_max_side"], job.layout,
+                                              vs["pile_zoom"])
                 img.crops_found, img.photo_cards, img.photo_error = result.crops, result.photo_cards, result.photo_error
+                img.debug = result.debug
                 reads = result.reads
                 job.step = f"Identifying cards in photo {n} of {len(job.images)}"
                 db.commit()
+                photo_reads = [r.card for r in reads if r.source == "photo"]
                 for r in reads:
-                    res = await resolver.resolve(db, matching.get_index(db), r.card, r.crop_path, cfg, opts, ask)
+                    card, raw = r.card, {"reply_entry": r.card.extra.get("raw")}
+                    if r.source == "photo":
+                        choice = piles.decide(matching.get_index(db), r.card, photo_reads)
+                        zoom = r.card.extra.get("zoom")
+                        raw = {"photo": r.card.extra.get("raw"), "used": choice.used,
+                               "count_differs": choice.count_differs,
+                               "zoom": zoom and {"name": zoom.name, "count": zoom.count,
+                                                 "confidence": zoom.confidence, "reply": zoom.raw}}
+                        conf = zoom.confidence if choice.used == "zoom" and zoom else r.card.confidence
+                        card = vision.ReadCard(name=choice.name, count=choice.count, confidence=conf,
+                                               set=r.card.set, collector_number=r.card.collector_number)
+                    res = await resolver.resolve(db, matching.get_index(db), card, r.crop_path, cfg, opts, ask)
                     img.detections.append(Detection(
                         source=r.source, crop_path=r.crop_path, bbox=r.bbox,
-                        raw_name=r.card.name[:255], raw_set=(r.card.set or "")[:20] or None,
+                        raw_name=card.name[:255], raw_set=(r.card.set or "")[:20] or None,
                         raw_number=(r.card.collector_number or "")[:20] or None,
-                        qty=r.card.count if r.source == "photo" else 1,
-                        model_confidence=res.confidence if res.confidence is not None else r.card.confidence,
-                        card_id=res.card_id, match_score=res.score, match_method=res.method,
+                        qty=card.count if r.source == "photo" else 1,
+                        model_confidence=res.confidence if res.confidence is not None else card.confidence,
+                        card_id=res.card_id, match_score=res.score, match_method=res.method, raw=raw,
                     ))
                 if result.photo_error is None:
                     seen = {d.card_id for d in img.detections if d.source == "photo" and d.card_id}

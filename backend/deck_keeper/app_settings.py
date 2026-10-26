@@ -62,6 +62,9 @@ SPECS: list[Spec] = [
     Spec("vision.candidate_reask", "MATCH_REASK", bool, True, "Ask again with likely candidates", "vision",
          "For hard-to-read cut-out cards, show the model the card again with the closest names and "
          "let it pick. One extra model call per unclear card."),
+    Spec("vision.pile_zoom", "PILE_ZOOM", bool, True, "Zoom in on each pile", "vision",
+         "Ask the model where each card or pile is, then re-read each one from a close-up to get the "
+         "count and name right. One extra model call per pile; needs a model that can give boxes."),
     Spec("vision.image_max_side", "VISION_IMAGE_MAX_SIDE", int, 1600, "Max image size sent (px)", "vision"),
     # Login / OIDC (names match Mealie)
     Spec("auth.password_login", "ALLOW_PASSWORD_LOGIN", bool, True, "Allow username/password login", "auth",

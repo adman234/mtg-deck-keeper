@@ -2,7 +2,7 @@ import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -53,7 +53,8 @@ def line_out(line: ScanLine, dets: dict[int, Detection], job_id: int) -> dict:
         sources.append({
             "detection_id": d.id, "image_id": d.image_id, "source": d.source, "raw_name": d.raw_name,
             "qty": d.qty, "model_confidence": d.model_confidence, "match_score": d.match_score,
-            "match_method": d.match_method,
+            "match_method": d.match_method, "bbox": d.bbox,
+            "used": (d.raw or {}).get("used"),
             "set": d.raw_set, "collector_number": d.raw_number,
             "crop_url": f"/api/scans/{job_id}/crops/{d.id}" if d.crop_path else None,
         })
@@ -164,6 +165,29 @@ def delete_scan(job_id: int, db: Session = Depends(get_db), user: User = Depends
     db.delete(job)
     db.commit()
     shutil.rmtree(_job_dir(job_id), ignore_errors=True)
+
+
+@router.get("/{job_id}/debug")
+def debug(job_id: int, download: bool = False, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """Everything the model said for this scan, for the raw-data view and bug reports."""
+    job = _job(db, job_id, user)
+    data = {
+        **job_summary(job),
+        "images": [{
+            "id": img.id, "filename": img.filename, "size": [img.width, img.height],
+            "crops_found": img.crops_found, "photo_cards": img.photo_cards, "photo_error": img.photo_error,
+            **(img.debug or {}),
+            "detections": [{
+                "id": d.id, "source": d.source, "read_as": d.raw_name, "qty": d.qty, "bbox": d.bbox,
+                "set": d.raw_set, "collector_number": d.raw_number,
+                "model_confidence": d.model_confidence, "card": d.card_id and db.get(Card, d.card_id).name,
+                "match_score": d.match_score, "match_method": d.match_method, "raw": d.raw,
+                "crop_url": f"/api/scans/{job.id}/crops/{d.id}" if d.crop_path else None,
+            } for d in img.detections],
+        } for img in job.images],
+    }
+    headers = {"Content-Disposition": f'attachment; filename="scan-{job.id}-raw.json"'} if download else None
+    return JSONResponse(data, headers=headers)
 
 
 @router.get("/{job_id}/photos/{image_id}")

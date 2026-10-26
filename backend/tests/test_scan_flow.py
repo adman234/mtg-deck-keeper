@@ -21,7 +21,7 @@ def _fake_model(request: httpx.Request) -> httpx.Response:
     assert body["model"] == "daily"
     return chat_reply([
         {"name": "Lightning Bolf", "count": 4, "confidence": 0.95},
-        {"name": "Monastery Swiftspear", "count": 4, "confidence": 0.97},
+        {"name": "Monastery Swiftspear", "count": 2, "confidence": 0.97},
         {"name": "Delver of Secrets", "count": 1, "confidence": 0.5},
         {"name": "Mountain", "count": 20, "confidence": 0.9},
         {"name": "Totally Made Up Card", "count": 1, "confidence": 0.3},
@@ -44,8 +44,8 @@ def test_photo_to_saved_deck(admin):
     scan = admin.get(f"/api/scans/{job_id}").json()
     assert scan["status"] == "review", scan["error"]
     lines = {(ln["card"] or {}).get("name") or ln["raw_name"]: ln for ln in scan["lines"]}
-    # Two photos of the same list are summed
-    assert lines["Lightning Bolt"]["qty"] == 8
+    # Two photos are summed, but 8 copies of a non-basic is over the 4-copy limit: capped and flagged
+    assert lines["Lightning Bolt"]["qty"] == 4 and "over_limit" in lines["Lightning Bolt"]["flags"]
     assert lines["Lightning Bolt"]["raw_name"] == "Lightning Bolf"
     assert "unmatched" in lines["Totally Made Up Card"]["flags"]
     assert "low_confidence" in lines["Delver of Secrets // Insectile Aberration"]["flags"]
@@ -60,6 +60,7 @@ def test_photo_to_saved_deck(admin):
     cards = admin.get("/api/cards/search", params={"q": "counterspell"}).json()
     admin.patch(f"/api/scans/{job_id}/lines/{unknown['id']}", json={"card_id": cards[0]["id"]})
     admin.patch(f"/api/scans/{job_id}/lines/{lines['Mountain']['id']}", json={"qty": 18})
+    admin.patch(f"/api/scans/{job_id}/lines/{lines['Lightning Bolt']['id']}", json={"accepted": True})
     scan = admin.patch(f"/api/scans/{job_id}/lines/{lines['Delver of Secrets // Insectile Aberration']['id']}",
                        json={"board": "side", "accepted": True}).json()
     assert not any(ln["needs_review"] for ln in scan["lines"])
@@ -67,12 +68,12 @@ def test_photo_to_saved_deck(admin):
     r = admin.post(f"/api/scans/{job_id}/save", json={"name": "Burn", "format": "modern"})
     assert r.status_code == 200, r.text
     deck = admin.get(f"/api/decks/{r.json()['deck_id']}").json()
-    assert deck["counts"] == {"commander": 0, "main": 8 + 8 + 18 + 2, "side": 2, "maybe": 0}
+    assert deck["counts"] == {"commander": 0, "main": 4 + 4 + 18 + 2, "side": 2, "maybe": 0}
     bolt = next(c for c in deck["cards"] if c["card"]["name"] == "Lightning Bolt")
     assert bolt["card"]["type_line"] == "Instant"
 
     arena = admin.get(f"/api/decks/{deck['id']}/export", params={"format": "arena"}).text
-    assert "Deck\n" in arena and "8 Lightning Bolt" in arena and "Sideboard\n2 Delver of Secrets" in arena
+    assert "Deck\n" in arena and "4 Lightning Bolt" in arena and "Sideboard\n2 Delver of Secrets" in arena
 
 
 def test_vision_server_down_marks_scan_failed(admin):
