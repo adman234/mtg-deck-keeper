@@ -317,7 +317,7 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
               <tbody>
                 <tr v-for="d in img.detections" :key="d.id">
                   <td>{{ d.read_as }} <span class="sub small">({{ d.source }})</span></td>
-                  <td class="num">{{ d.qty }}</td>
+                  <td class="num">{{ d.qty }}<span v-if="d.raw?.fan" class="sub small" :title="`Counted from the edges fanned out to the ${d.raw.fan.direction}`"> · {{ d.raw.fan.count }} by edges</span></td>
                   <td class="small">{{ d.raw?.photo ? `${d.raw.photo.name} ×${d.raw.photo.count}` : "—" }}</td>
                   <td class="small">{{ d.raw?.zoom ? `${d.raw.zoom.name || "(no title)"} ×${d.raw.zoom.count ?? "?"}` : "—" }}<span v-if="d.raw?.used" class="sub"> · used {{ d.raw.used }}</span><span v-if="d.raw?.tiebreak" class="sub"> · asked to choose: {{ d.raw.tiebreak.name || "no answer" }}</span><span v-if="d.raw?.snapped" class="sub"> · box lined up</span><span v-else-if="d.raw?.shifted" class="sub"> · box moved</span></td>
                   <td>{{ d.card || "—" }}</td>

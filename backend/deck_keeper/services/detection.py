@@ -14,12 +14,15 @@ CARD_RATIO = 63 / 88  # width / height, about 0.716
 RATIO_TOLERANCE = 0.12
 OUT_W, OUT_H = 488, 680
 SMALL_FRACTION = 0.6  # an art box is ~45% of its card's area
+PERSPECTIVE = 0.7  # far side of a card seen at an angle: at least this long next to the near side
+PILE_SHAPE = 0.04  # a quad this much further from card proportions than one inside it is a pile
 
 
 @dataclass
 class FoundCard:
     bbox: list[int]  # x, y, w, h in the source image
     image: np.ndarray  # upright BGR crop
+    corners: list[list[float]] | None = None  # top-left, top-right, bottom-right, bottom-left
 
 
 def _order(pts: np.ndarray) -> np.ndarray:
@@ -59,24 +62,21 @@ def find_cards(img: np.ndarray, max_cards: int = 100) -> list[FoundCard]:
         approx = cv2.approxPolyDP(c, 0.02 * cv2.arcLength(c, True), True)
         if len(approx) != 4 or not cv2.isContourConvex(approx):
             continue
-        rect = cv2.minAreaRect(approx)
-        rw, rh = rect[1]
-        if min(rw, rh) == 0:
-            continue
-        ratio = min(rw, rh) / max(rw, rh)
-        if abs(ratio - CARD_RATIO) > RATIO_TOLERANCE:
-            continue
-        # Reject shapes that are far from rectangular (rect fill ratio).
-        if a / (rw * rh) < 0.85:
+        if not _card_shaped(approx, a):
             continue
         x, y, bw, bh = cv2.boundingRect(approx)
         quads.append((a, approx, [int(x), int(y), int(bw), int(bh)]))
 
     # Largest first; drop duplicates (same card found by several masks) and inner boxes (art frames).
+    # But a quad holding a much more card-shaped one that fills most of it is a small pile (or a
+    # card with its neighbour's sliver) outlined as one: keep the card inside instead.
     quads.sort(key=lambda q: -q[0])
     kept: list[tuple[float, np.ndarray, list[int]]] = []
     for q in quads:
         bx = q[2]
+        if any(_contains(bx, o[2]) and o[0] >= q[0] * 0.6 and _shape_error(o[1]) + PILE_SHAPE < _shape_error(q[1])
+               for o in quads if o is not q):
+            continue
         if any(_iou(bx, k[2]) > 0.4 or _contains(k[2], bx) for k in kept):
             continue
         kept.append(q)
@@ -94,8 +94,33 @@ def find_cards(img: np.ndarray, max_cards: int = 100) -> list[FoundCard]:
     kept.sort(key=lambda q: (round(q[2][1] / max(1, q[2][3] * 0.5)), q[2][0]))
     found = []
     for _, approx, bbox in kept:
-        found.append(FoundCard(bbox=bbox, image=_warp(img, approx)))
+        found.append(FoundCard(bbox=bbox, image=_warp(img, approx), corners=_order(approx).tolist()))
     return found
+
+
+def _shape_error(approx: np.ndarray) -> float:
+    """How far a quad's proportions are from a card's. A card seen at an angle is a trapezoid,
+    so its proportions come from the average lengths of opposite sides."""
+    tl, tr, br, bl = _order(approx)
+    top, bottom = np.linalg.norm(tr - tl), np.linalg.norm(br - bl)
+    left, right = np.linalg.norm(bl - tl), np.linalg.norm(br - tr)
+    w, h = (top + bottom) / 2, (left + right) / 2
+    return abs(min(w, h) / max(w, h, 1e-6) - CARD_RATIO)
+
+
+def _card_shaped(approx: np.ndarray, contour_area: float) -> bool:
+    """Card proportions, opposite sides of similar length (allowing for perspective), and the
+    contour fills the quad."""
+    tl, tr, br, bl = _order(approx)
+    top, bottom = np.linalg.norm(tr - tl), np.linalg.norm(br - bl)
+    left, right = np.linalg.norm(bl - tl), np.linalg.norm(br - tr)
+    if min(top, bottom, left, right) == 0:
+        return False
+    if min(top, bottom) / max(top, bottom) < PERSPECTIVE or min(left, right) / max(left, right) < PERSPECTIVE:
+        return False
+    if _shape_error(approx) > RATIO_TOLERANCE:
+        return False
+    return contour_area / max(1.0, cv2.contourArea(approx.astype(np.float32))) >= 0.85
 
 
 def _contains(outer: list[int], inner: list[int]) -> bool:

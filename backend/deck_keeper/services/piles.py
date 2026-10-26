@@ -14,7 +14,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import matching, vision
+from . import fans, matching, vision
 
 log = logging.getLogger(__name__)
 
@@ -148,7 +148,8 @@ def _pair_by_overlap(cards: list[vision.ReadCard], found: list[list[int]]) -> li
     return pairs
 
 
-def snap_boxes(cards: list[vision.ReadCard], found: list[list[int]]) -> dict:
+def snap_boxes(cards: list[vision.ReadCard], found: list[list[int]],
+               corners: list[list[list[float]]] | None = None) -> dict:
     """Move the model's boxes onto the cards OpenCV found.
 
     The model's boxes are rough: in scans 12 and 13 whole rows sat a third of a card or more too
@@ -174,6 +175,8 @@ def snap_boxes(cards: list[vision.ReadCard], found: list[list[int]]) -> dict:
         c.extra["snapped"] = True
         if c.count >= 2:
             c.extra["bbox"] = _union(c.extra["bbox"], f)
+            if corners:
+                c.extra["front_corners"] = corners[j]
         else:
             by_row.setdefault(row_of[i], []).append(_edges(f) - _edges(c.extra["model_bbox"]))
             c.extra["bbox"] = f
@@ -304,8 +307,21 @@ class Decision:
     unsure: bool = False  # the close-up couldn't confirm the name
 
 
-def combine_counts(photo: int, zoom: int | None) -> tuple[int, bool]:
+def count_fans(img: np.ndarray, cards: list[vision.ReadCard]) -> None:
+    """Count the cards in each pile whose front card OpenCV found, from the slivers fanned out
+    behind it (stored as extra["fan"])."""
+    for c in cards:
+        if c.extra.get("front_corners") and c.extra.get("bbox"):
+            c.extra["fan"] = fans.count_pile(img, c.extra["bbox"], c.extra["front_corners"])
+
+
+def combine_counts(photo: int, zoom: int | None, fan: fans.FanCount | None = None) -> tuple[int, bool]:
     """Pick the pile count from the whole-table read and the close-up. Returns (count, disagree).
+
+    - Slivers counted by OpenCV win: the models can't count stacked card edges reliably (in the
+      elves photo they said 5 or 6 for piles of 4). It can only count cards that show an edge,
+      so a card hidden exactly behind another is missed. A count of 1 means it saw no slivers
+      (a squared-up pile, or the fan went unseen), so the models' counts are used instead.
 
     - Close-up says 1, whole table says more: the close-up box held only the front card and
       couldn't see the stack, so keep the whole-table count.
@@ -313,6 +329,8 @@ def combine_counts(photo: int, zoom: int | None) -> tuple[int, bool]:
       edge of the next pile, and the whole-table read leans towards 5.
     Either way the line is flagged so the quantity gets a look.
     """
+    if fan is not None and fan.count >= 2:
+        return fan.count, False
     if zoom is None or zoom == photo:
         return photo, False
     if zoom == 1 and photo >= 2:
@@ -371,9 +389,10 @@ def _judge(index: matching.CardIndex, card: vision.ReadCard, others: list[vision
     """Pick between the whole-photo read and the close-up read of one entry, or say which card
     names to ask the model to choose between."""
     zoom: vision.ZoomRead | None = card.extra.get("zoom")
+    fan = card.extra.get("fan")
     if zoom is None:
-        return Decision(card.name, card.count, "photo", False)
-    count, differs = combine_counts(card.count, zoom.count)
+        return Decision(card.name, combine_counts(card.count, None, fan)[0], "photo", False)
+    count, differs = combine_counts(card.count, zoom.count, fan)
     if not zoom.name:
         # The close-up couldn't see a title, so the whole-table name is unconfirmed (and is
         # where made-up names come from).

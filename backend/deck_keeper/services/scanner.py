@@ -117,7 +117,8 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
         if zoom and box_scale:
             # The model's boxes are rough; line them up with the cards OpenCV can find (no model calls).
             outlines = await asyncio.to_thread(detection.find_cards, img)
-            debug["snap"] = piles.snap_boxes(cards, [f.bbox for f in outlines])
+            debug["snap"] = piles.snap_boxes(cards, [f.bbox for f in outlines], [f.corners for f in outlines])
+            await asyncio.to_thread(piles.count_fans, img, cards)
             await piles.zoom_in(img, cards, Path(img_row.path).parent / "crops", Path(img_row.path).stem, cfg, sem)
             if index is not None:
                 await piles.settle(img, cards, index, cfg, sem)
@@ -319,6 +320,8 @@ async def process_job(job_id: int) -> None:
                                "unsure": choice.unsure, "zoom_region": r.card.extra.get("zoom_region"),
                                "model_box": r.card.extra.get("model_bbox"), "snapped": r.card.extra.get("snapped"),
                                "shifted": r.card.extra.get("shifted"), "tiebreak": r.card.extra.get("tiebreak"),
+                               "fan": (fan := r.card.extra.get("fan")) and {"count": fan.count, "direction": fan.direction,
+                                                                            "edges": fan.edges},
                                "zoom": zoom and {"name": zoom.name, "count": zoom.count, "retried": zoom.retried,
                                                  "confidence": zoom.confidence, "reply": zoom.raw}}
                         conf = zoom.confidence if choice.used == "zoom" and zoom else r.card.confidence
