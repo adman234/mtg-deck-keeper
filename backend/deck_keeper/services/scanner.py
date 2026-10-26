@@ -84,7 +84,7 @@ class _ImageResult:
 
 async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionConfig,
                          sem: asyncio.Semaphore, max_side: int, layout: str = "piles",
-                         zoom: bool = True) -> _ImageResult:
+                         zoom: bool = True, index: matching.CardIndex | None = None) -> _ImageResult:
     img = await asyncio.to_thread(cv2.imread, img_row.path)
     if img is None:
         raise vision.VisionError(f"Could not open {img_row.filename}")
@@ -112,11 +112,16 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
     else:
         box_scale = piles.place_boxes(cards, sent, (w, h))
         cards, duplicates = piles.drop_duplicates(cards)
-        if zoom and box_scale:
-            await piles.zoom_in(img, cards, Path(img_row.path).parent / "crops", Path(img_row.path).stem, cfg, sem)
-        photo_cards = len(cards)
         debug = {"reply": reply, "sent_size": list(sent), "box_scale": box_scale,
                  "duplicates": [{"name": d.name, "count": d.count, "box": d.extra.get("bbox")} for d in duplicates]}
+        if zoom and box_scale:
+            # The model's boxes are rough; line them up with the cards OpenCV can find (no model calls).
+            outlines = await asyncio.to_thread(detection.find_cards, img)
+            debug["snap"] = piles.snap_boxes(cards, [f.bbox for f in outlines])
+            await piles.zoom_in(img, cards, Path(img_row.path).parent / "crops", Path(img_row.path).stem, cfg, sem)
+            if index is not None:
+                await piles.settle(img, cards, index, cfg, sem)
+        photo_cards = len(cards)
         reads.extend(_Read("photo", c.extra.get("crop_path"), c.extra.get("bbox"), c) for c in cards)
 
     # 2. Pre-pass only as a fallback: when the whole-photo read failed or gave no usable boxes,
@@ -297,7 +302,7 @@ async def process_job(job_id: int) -> None:
                 job.step = f"Reading photo {n} of {len(job.images)}"
                 db.commit()
                 result = await _process_image(img, job.prepass, cfg, sem, vs["image_max_side"], job.layout,
-                                              vs["pile_zoom"])
+                                              vs["pile_zoom"], matching.get_index(db))
                 img.crops_found, img.photo_cards, img.photo_error = result.crops, result.photo_cards, result.photo_error
                 img.debug = result.debug
                 reads = result.reads
@@ -312,6 +317,8 @@ async def process_job(job_id: int) -> None:
                         raw = {"photo": r.card.extra.get("raw"), "used": choice.used,
                                "count_differs": choice.count_differs,
                                "unsure": choice.unsure, "zoom_region": r.card.extra.get("zoom_region"),
+                               "model_box": r.card.extra.get("model_bbox"), "snapped": r.card.extra.get("snapped"),
+                               "shifted": r.card.extra.get("shifted"), "tiebreak": r.card.extra.get("tiebreak"),
                                "zoom": zoom and {"name": zoom.name, "count": zoom.count, "retried": zoom.retried,
                                                  "confidence": zoom.confidence, "reply": zoom.raw}}
                         conf = zoom.confidence if choice.used == "zoom" and zoom else r.card.confidence

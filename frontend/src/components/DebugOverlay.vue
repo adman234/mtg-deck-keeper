@@ -1,14 +1,16 @@
 <script setup>
 import { computed, reactive, ref } from "vue";
 
-// Draws what the scan found on top of the photo: the model's card/pile boxes, the close-up
-// areas that were re-read, the OpenCV cut-outs, and what was ignored or dropped.
+// Draws what the scan found on top of the photo: the model's card/pile boxes (after lining them
+// up with the card outlines OpenCV found), the close-up areas that were re-read, the OpenCV
+// cut-outs, and what was ignored or dropped.
 const props = defineProps({
   url: String,
   width: Number,
   height: Number,
   detections: { type: Array, default: () => [] },
   duplicates: { type: Array, default: () => [] },
+  outlines: { type: Array, default: () => [] },
   filename: { type: String, default: "scan" },
 });
 
@@ -16,11 +18,14 @@ const LAYERS = [
   { id: "found", label: "Cards & piles (model)", color: "#ffd23f" },
   { id: "unsure", label: "Unsure name", color: "#ff8a3d" },
   { id: "zoom", label: "Close-up area re-read", color: "#38d6ff", dash: true },
+  { id: "model", label: "Model's box before lining up", color: "#e879f9", dash: true },
+  { id: "outline", label: "Card outlines (OpenCV)", color: "#a3e635", dash: true },
   { id: "cutout", label: "Cut-outs (pre-pass)", color: "#4ade80" },
   { id: "ignored", label: "Ignored cut-outs", color: "#ff5c5c", dash: true },
   { id: "duplicate", label: "Dropped duplicates", color: "#b8b8c8", dash: true },
 ];
-const on = reactive(Object.fromEntries(LAYERS.map((l) => [l.id, l.id !== "zoom"])));
+const HIDDEN = ["zoom", "model", "outline"];
+const on = reactive(Object.fromEntries(LAYERS.map((l) => [l.id, !HIDDEN.includes(l.id)])));
 const style = Object.fromEntries(LAYERS.map((l) => [l.id, l]));
 
 const shapes = computed(() => {
@@ -33,11 +38,13 @@ const shapes = computed(() => {
         out.push({ layer: unsure ? "unsure" : "found", box: d.bbox, label, sub: d.card && d.card !== d.read_as ? `read “${d.read_as}”` : "" });
       }
       if (d.raw?.zoom_region) out.push({ layer: "zoom", box: d.raw.zoom_region, label: "" });
+      if (d.raw?.model_box) out.push({ layer: "model", box: d.raw.model_box, label: "" });
     } else if (d.bbox) {
       const ignored = d.match_method === "unconfirmed";
       out.push({ layer: ignored ? "ignored" : "cutout", box: d.bbox, label: `${ignored ? "ignored: " : ""}${d.read_as}`, below: 1 });
     }
   }
+  for (const box of props.outlines) out.push({ layer: "outline", box, label: "" });
   for (const d of props.duplicates) {
     if (d.box) out.push({ layer: "duplicate", box: d.box, label: `dropped: ${d.name} ×${d.count}`, below: 2 });
   }

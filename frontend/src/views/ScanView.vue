@@ -305,7 +305,8 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
             <span v-if="img.error" class="warn-text"> · failed: {{ img.error }}</span>
           </p>
           <DebugOverlay :url="scan.images[i]?.url" :width="img.size[0]" :height="img.size[1]"
-                        :detections="img.detections" :duplicates="img.duplicates || []" :filename="img.filename" />
+                        :detections="img.detections" :duplicates="img.duplicates || []"
+                        :outlines="img.snap?.found || []" :filename="img.filename" />
           <details>
             <summary>Whole-photo reply</summary>
             <pre>{{ img.reply || "(none)" }}</pre>
@@ -318,7 +319,7 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
                   <td>{{ d.read_as }} <span class="sub small">({{ d.source }})</span></td>
                   <td class="num">{{ d.qty }}</td>
                   <td class="small">{{ d.raw?.photo ? `${d.raw.photo.name} ×${d.raw.photo.count}` : "—" }}</td>
-                  <td class="small">{{ d.raw?.zoom ? `${d.raw.zoom.name || "(no title)"} ×${d.raw.zoom.count ?? "?"}` : "—" }}<span v-if="d.raw?.used" class="sub"> · used {{ d.raw.used }}</span></td>
+                  <td class="small">{{ d.raw?.zoom ? `${d.raw.zoom.name || "(no title)"} ×${d.raw.zoom.count ?? "?"}` : "—" }}<span v-if="d.raw?.used" class="sub"> · used {{ d.raw.used }}</span><span v-if="d.raw?.tiebreak" class="sub"> · asked to choose: {{ d.raw.tiebreak.name || "no answer" }}</span><span v-if="d.raw?.snapped" class="sub"> · box lined up</span><span v-else-if="d.raw?.shifted" class="sub"> · box moved</span></td>
                   <td>{{ d.card || "—" }}</td>
                   <td class="num">{{ Math.round(d.match_score) }}%</td>
                   <td class="small">{{ d.match_method || "—" }}</td>
