@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { api, BOARDS, FLAG_TEXT, FORMATS, QTY_FLAGS, fmtDate, methodText, pct } from "../api";
 import CardSearch from "../components/CardSearch.vue";
+import DebugOverlay from "../components/DebugOverlay.vue";
 
 const props = defineProps({ id: String });
 const router = useRouter();
@@ -303,6 +304,8 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
             {{ img.duplicates?.length || 0 }} duplicate entr{{ img.duplicates?.length === 1 ? "y" : "ies" }} dropped
             <span v-if="img.error" class="warn-text"> · failed: {{ img.error }}</span>
           </p>
+          <DebugOverlay :url="scan.images[i]?.url" :width="img.size[0]" :height="img.size[1]"
+                        :detections="img.detections" :duplicates="img.duplicates || []" :filename="img.filename" />
           <details>
             <summary>Whole-photo reply</summary>
             <pre>{{ img.reply || "(none)" }}</pre>

@@ -96,6 +96,10 @@ def test_scan_zooms_into_piles(admin):
     assert img["duplicates"][0]["name"] == "Lightnin Mage"
     det = img["detections"][0]
     assert det["raw"]["photo"]["count"] == 5 and det["raw"]["zoom"]["count"] == 4
+    # The close-up area is the model's box plus more room above than at the sides
+    zx, zy, zw, zh = det["raw"]["zoom_region"]
+    bx, by, bw, bh = det["bbox"]
+    assert zx <= bx and zy < by and zx + zw >= bx + bw and (by - zy) > (bx - zx)
     dl = admin.get(f"/api/scans/{job_id}/debug", params={"download": "true"})
     assert "attachment" in dl.headers["content-disposition"]
 
@@ -178,6 +182,7 @@ def test_close_up_without_a_title_retries_taller(tmp_path):
     assert (zoom.name, zoom.retried) == ("Forest", True)
     assert sizes[1] > sizes[0]  # second crop reaches further up
     assert card.extra["crop_path"].endswith("-tall.jpg")
+    assert card.extra["zoom_region"][1] < 600 - 400 * 0.5  # the taller crop's area is the one recorded
 
 
 def test_close_up_is_not_told_the_whole_table_name():

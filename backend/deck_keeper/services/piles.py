@@ -75,14 +75,19 @@ def drop_duplicates(cards: list[vision.ReadCard]) -> tuple[list[vision.ReadCard]
     return kept, dropped
 
 
-def _crop(img: np.ndarray, bbox: list[int], top: float = PAD_TOP) -> np.ndarray:
-    """Cut a box out with extra room above (models often start the box below the title bar)
-    and little at the sides (where the neighbouring pile is)."""
-    h, w = img.shape[:2]
+def crop_region(img_size: tuple[int, int], bbox: list[int], top: float = PAD_TOP) -> list[int]:
+    """The area a close-up covers, [x, y, w, h]: extra room above (models often start the box
+    below the title bar) and little at the sides (where the neighbouring pile is)."""
+    w, h = img_size
     x, y, bw, bh = bbox
     x1, x2 = int(max(0, x - bw * PAD_SIDE)), int(min(w, x + bw * (1 + PAD_SIDE)))
     y1, y2 = int(max(0, y - bh * top)), int(min(h, y + bh * (1 + PAD_BOTTOM)))
-    crop = img[y1:y2, x1:x2]
+    return [x1, y1, x2 - x1, y2 - y1]
+
+
+def _crop(img: np.ndarray, bbox: list[int], top: float = PAD_TOP) -> np.ndarray:
+    x, y, w, h = crop_region((img.shape[1], img.shape[0]), bbox, top)
+    crop = img[y:y + h, x:x + w]
     scale = min(1.0, ZOOM_MAX_SIDE / max(crop.shape[:2]))
     if scale < 1:
         crop = cv2.resize(crop, (int(crop.shape[1] * scale), int(crop.shape[0] * scale)), interpolation=cv2.INTER_AREA)
@@ -104,6 +109,7 @@ async def zoom_in(img: np.ndarray, cards: list[vision.ReadCard], crop_dir: Path,
             result = await vision.read_pile(cfg, buf.tobytes())
         if result is not None and (result.name or "crop_path" not in card.extra):
             card.extra["crop_path"] = str(path)
+            card.extra["zoom_region"] = crop_region((img.shape[1], img.shape[0]), card.extra["bbox"], top)
         return result
 
     async def one(i: int, card: vision.ReadCard) -> None:
