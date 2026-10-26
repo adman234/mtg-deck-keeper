@@ -194,3 +194,12 @@ def test_cut_off_photo_reply_still_counts(admin):
     scan = _scan(admin, _jpeg(), prepass=False)
     names = {(ln["card"] or {}).get("name") or ln["raw_name"]: ln["qty"] for ln in scan["lines"]}
     assert names["Mountain"] == 4 and names["Shock"] == 2
+
+
+def test_layout_is_stored_and_can_change_on_rerun(admin):
+    vision.transport = _by_prompt(chat_reply([]), chat_reply([{"name": "Counterspell", "count": 4, "confidence": 0.9}]))
+    scan = _scan(admin, _jpeg(), prepass=False)
+    assert scan["layout"] == "piles"
+    r = admin.post(f"/api/scans/{scan['id']}/rerun", json={"layout": "spread"})
+    assert r.status_code == 200 and r.json()["layout"] == "spread"
+    assert admin.post(f"/api/scans/{scan['id']}/rerun", json={"layout": "heap"}).status_code in (400, 409)

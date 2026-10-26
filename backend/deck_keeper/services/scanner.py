@@ -82,14 +82,14 @@ class _ImageResult:
 
 
 async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionConfig,
-                         sem: asyncio.Semaphore, max_side: int) -> _ImageResult:
+                         sem: asyncio.Semaphore, max_side: int, layout: str = "piles") -> _ImageResult:
     img = await asyncio.to_thread(cv2.imread, img_row.path)
     if img is None:
         raise vision.VisionError(f"Could not open {img_row.filename}")
 
     async def ask(jpeg: bytes, single: bool) -> list[vision.ReadCard]:
         async with sem:
-            return await vision.read_cards(cfg, jpeg, single)
+            return await vision.read_cards(cfg, jpeg, single, layout)
 
     tasks: list[tuple[str, str | None, list[int] | None, asyncio.Task]] = []
     found: list[detection.FoundCard] = []
@@ -250,7 +250,7 @@ async def process_job(job_id: int) -> None:
             for n, img in enumerate(job.images, start=1):
                 job.step = f"Reading photo {n} of {len(job.images)}"
                 db.commit()
-                result = await _process_image(img, job.prepass, cfg, sem, vs["image_max_side"])
+                result = await _process_image(img, job.prepass, cfg, sem, vs["image_max_side"], job.layout)
                 img.crops_found, img.photo_cards, img.photo_error = result.crops, result.photo_cards, result.photo_error
                 reads = result.reads
                 job.step = f"Identifying cards in photo {n} of {len(job.images)}"

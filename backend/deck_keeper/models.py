@@ -86,6 +86,7 @@ class ScanJob(Base):
     name: Mapped[str] = mapped_column(String(200), default="")
     status: Mapped[str] = mapped_column(String(20), default="queued")  # queued|processing|review|saved|failed
     prepass: Mapped[bool] = mapped_column(Boolean, default=True)
+    layout: Mapped[str] = mapped_column(String(10), default="piles", server_default="piles")  # piles | spread
     model: Mapped[str] = mapped_column(String(200), default="")
     step: Mapped[str] = mapped_column(String(200), default="")
     error: Mapped[str | None] = mapped_column(Text)

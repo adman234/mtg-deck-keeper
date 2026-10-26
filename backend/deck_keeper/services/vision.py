@@ -49,6 +49,18 @@ PHOTO_PROMPT = (
     '"confidence": ...}]}'
 )
 
+PILES_PROMPT = (
+    "The cards in this photo are in piles. Each pile is several copies of the same card, overlapped so "
+    "only the FRONT card's title is fully visible and just the edges of the cards behind it show. The "
+    "cards behind can be other printings or languages of the same card. For each pile, give the name "
+    "of the front card only, and count = the number of cards in the pile including the front one "
+    "(count the stacked edges). Never read or guess names from the slivers of the cards behind. "
+    "A card on its own is a pile of 1. If two piles show the same card, list both. "
+    'Format: {"cards": [{"name": ..., "count": ..., "confidence": ...}]}'
+)
+
+LAYOUTS = {"piles": PILES_PROMPT, "spread": PHOTO_PROMPT}
+
 CROP_PROMPT = (
     "This image is a single Magic card. Return exactly one entry with count 1. If you can't see a "
     'title line (for example only artwork is visible) or can\'t read it, return {"cards": []}. Newer '
@@ -117,7 +129,7 @@ def _salvage(text: str) -> list:
     return items
 
 
-def parse_cards(text: str) -> list[ReadCard]:
+def parse_cards(text: str, add_repeats: bool = False) -> list[ReadCard]:
     """Parse the model's reply, tolerating code fences, chatter and replies that were cut off."""
     text = text.strip()
     fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
@@ -139,7 +151,8 @@ def parse_cards(text: str) -> list[ReadCard]:
     for item in items if isinstance(items, list) else []:
         if not isinstance(item, dict):
             continue
-        name = str(item.get("name") or "").strip()
+        # Some models write names like "Wirewood_Symbiote".
+        name = re.sub(r"\s+", " ", str(item.get("name") or "").replace("_", " ")).strip()
         if not name:
             continue
         try:
@@ -154,9 +167,9 @@ def parse_cards(text: str) -> list[ReadCard]:
             conf = conf / 100
         key = name.casefold()
         if key in seen:
-            # Small models sometimes repeat entries until they run out of tokens; a repeat is
-            # the same card, not more copies.
-            seen[key].count = max(seen[key].count, count)
+            # In piles, two piles of one card are listed separately and add up. Otherwise a repeat
+            # is the same card: small models sometimes repeat entries until they run out of tokens.
+            seen[key].count = seen[key].count + count if add_repeats else max(seen[key].count, count)
             continue
         card = ReadCard(
             name=name,
@@ -184,7 +197,7 @@ def _message_text(message: dict) -> tuple[str, str]:
     return content, reasoning if isinstance(reasoning, str) else ""
 
 
-async def read_cards(cfg: VisionConfig, jpeg: bytes, single_card: bool) -> list[ReadCard]:
+async def read_cards(cfg: VisionConfig, jpeg: bytes, single_card: bool, layout: str = "piles") -> list[ReadCard]:
     if not cfg.model:
         raise VisionError("No vision model is configured. Choose one in Settings → Vision model.")
     image_url = "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()
@@ -196,7 +209,7 @@ async def read_cards(cfg: VisionConfig, jpeg: bytes, single_card: bool) -> list[
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": [
-                {"type": "text", "text": CROP_PROMPT if single_card else PHOTO_PROMPT},
+                {"type": "text", "text": CROP_PROMPT if single_card else LAYOUTS.get(layout, PILES_PROMPT)},
                 {"type": "image_url", "image_url": {"url": image_url}},
             ]},
         ],
@@ -226,12 +239,13 @@ async def read_cards(cfg: VisionConfig, jpeg: bytes, single_card: bool) -> list[
         content, reasoning = _message_text(choice["message"])
     except (KeyError, IndexError, TypeError, ValueError) as e:
         raise VisionError(f"Unexpected reply from vision server: {r.text[:300]}") from e
+    add_repeats = not single_card and layout == "piles"
     if content.strip():
-        return parse_cards(content)
+        return parse_cards(content, add_repeats)
     if reasoning.strip():
         # Thinking models sometimes put the whole answer in the reasoning text.
         try:
-            return parse_cards(reasoning)
+            return parse_cards(reasoning, add_repeats)
         except VisionError:
             pass
     log.warning("Empty reply from %s (finish_reason=%s): %s", cfg.model, choice.get("finish_reason"), r.text[:500])
