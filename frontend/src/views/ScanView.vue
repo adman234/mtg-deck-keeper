@@ -56,8 +56,10 @@ function addCard(card) {
   act(() => api(`/api/scans/${props.id}/lines`, { method: "POST", body: { card_id: card.id, qty: addQty.value, board: addBoard.value } }));
   addQty.value = 1;
 }
+const rerunLayout = ref("piles");
+watch(() => scan.value?.layout, (v) => v && (rerunLayout.value = v));
 async function rerun(prepass) {
-  await act(() => api(`/api/scans/${props.id}/rerun`, { method: "POST", body: { prepass } }));
+  await act(() => api(`/api/scans/${props.id}/rerun`, { method: "POST", body: { prepass, layout: rerunLayout.value } }));
   load();
 }
 async function del() {
@@ -88,6 +90,19 @@ const totals = computed(() => {
 });
 const progress = computed(() => (scan.value?.total_images ? scan.value.processed_images / scan.value.total_images : 0));
 const how = (l) => [...new Set(l.sources.map((s) => methodText(s.match_method)).filter(Boolean))].join(" · ");
+// Below this name-match score the "match" is just the nearest spelling, often to a name the
+// model made up, so the line leads with what was read rather than a card name and picture.
+const SURE_SCORE = 85;
+const bestScore = (l) => Math.max(0, ...l.sources.map((s) => s.match_score || 0));
+const unsure = (l) => !!l.card && !l.user_edited && !l.accepted && l.sources.length > 0 && bestScore(l) < SURE_SCORE;
+const choices = (l) => {
+  const list = unsure(l) ? [{ card_id: l.card.id, name: l.card.name }, ...l.suggestions] : l.suggestions;
+  return list.filter((c, i) => list.findIndex((x) => x.card_id === c.card_id) === i).slice(0, 4);
+};
+function choose(l, c) {
+  if (l.card && c.card_id === l.card.id) patch(l, { accepted: true });
+  else pickCard(l, { id: c.card_id });
+}
 const checkQty = (l) => !l.accepted && l.flags.some((f) => QTY_FLAGS.includes(f));
 const pillFlags = (l) => l.flags.filter((f) => !QTY_FLAGS.includes(f));
 const confClass = (l) => (!l.card ? "bad" : l.confidence >= scan.value.threshold ? "ok" : "warn");
@@ -108,12 +123,18 @@ const sourceText = (l) => {
       <div>
         <p class="sub"><RouterLink to="/scans">Scans</RouterLink> / #{{ scan.id }}</p>
         <h1>{{ scan.name || `Scan #${scan.id}` }}</h1>
-        <p class="sub">{{ scan.total_images }} photo{{ scan.total_images === 1 ? "" : "s" }} · {{ scan.model || "default model" }} · pre-pass {{ scan.prepass ? "on" : "off" }} · {{ fmtDate(scan.created_at) }}</p>
+        <p class="sub">{{ scan.total_images }} photo{{ scan.total_images === 1 ? "" : "s" }} · {{ scan.model || "default model" }} · {{ scan.layout === "spread" ? "spread out" : "piles" }} · pre-pass {{ scan.prepass ? "on" : "off" }} · {{ fmtDate(scan.created_at) }}</p>
       </div>
       <template v-if="!['queued', 'processing'].includes(scan.status)">
         <details class="rerun">
           <summary class="btn small">Read again</summary>
           <div class="menu">
+            <label class="field small">Cards are
+              <select id="rerun-layout" v-model="rerunLayout">
+                <option value="piles">In piles of the same card</option>
+                <option value="spread">Spread out, all visible</option>
+              </select>
+            </label>
             <button class="btn small" @click="rerun(true)">With card pre-pass</button>
             <button class="btn small" @click="rerun(false)">Whole photos only</button>
             <p class="sub" style="font-size:0.8rem">Replaces the current review list.</p>
@@ -166,7 +187,7 @@ const sourceText = (l) => {
             <img :src="crops(l)[0].crop_url" alt="" loading="lazy" />
             <span v-if="crops(l).length > 1" class="more num">×{{ crops(l).length }}</span>
           </button>
-          <button v-else-if="l.card?.image_uri" class="thumb ref" @click="zoom = l.card.image_uri"
+          <button v-else-if="l.card?.image_uri && !unsure(l)" class="thumb ref" @click="zoom = l.card.image_uri"
                   :aria-label="`Show ${l.card.name}`" title="Card image from Scryfall (no cut-out from your photo)">
             <img :src="l.card.image_uri" alt="" loading="lazy" />
           </button>
@@ -184,22 +205,24 @@ const sourceText = (l) => {
           <div class="name">
             <template v-if="changing !== l.id">
               <div class="row" style="gap:8px">
-                <strong v-if="l.card">{{ l.card.name }}</strong>
-                <strong v-else class="unknown">“{{ l.raw_name }}”</strong>
+                <strong v-if="l.card && !unsure(l)">{{ l.card.name }}</strong>
+                <strong v-else class="unknown" :title="'What the model read'">“{{ l.raw_name }}”</strong>
                 <button class="link" @click="changing = l.id">Change</button>
               </div>
               <p class="sub small">
-                <span v-if="l.card && l.raw_name.toLowerCase() !== l.card.name.toLowerCase()">Read as “{{ l.raw_name }}” · </span>
+                <span v-if="unsure(l)">No card matches this well · </span>
+                <span v-else-if="!l.card">No matching card · </span>
+                <span v-else-if="l.raw_name.toLowerCase() !== l.card.name.toLowerCase()">Read as “{{ l.raw_name }}” · </span>
                 <span v-if="l.sources.length">{{ sourceText(l) }}</span>
                 <span v-else>Added by you</span>
               </p>
-              <p v-if="l.card && how(l)" class="sub small how">{{ how(l) }}</p>
-              <div v-if="pillFlags(l).length && !l.accepted" class="row" style="gap:6px">
-                <span v-for="f in pillFlags(l)" :key="f" class="pill" :class="f === 'unmatched' ? 'bad' : 'warn'">{{ FLAG_TEXT[f] || f }}</span>
+              <p v-if="l.card && !unsure(l) && how(l)" class="sub small how">{{ how(l) }}</p>
+              <div v-if="pillFlags(l).length && !l.accepted && !unsure(l) && l.card" class="row" style="gap:6px">
+                <span v-for="f in pillFlags(l)" :key="f" class="pill warn">{{ FLAG_TEXT[f] || f }}</span>
               </div>
-              <div v-if="l.needs_review && l.suggestions.length" class="row suggest">
-                <span class="sub small">Did you mean</span>
-                <button v-for="s in l.suggestions" :key="s.card_id" class="btn small" @click="pickCard(l, { id: s.card_id })">{{ s.name }}</button>
+              <div v-if="choices(l).length && (l.needs_review || unsure(l))" class="row suggest">
+                <span class="sub small">{{ unsure(l) ? "Closest cards" : "Did you mean" }}</span>
+                <button v-for="c in choices(l)" :key="c.card_id" class="btn small" @click="choose(l, c)">{{ c.name }}</button>
               </div>
             </template>
             <div v-else class="row" style="flex-wrap:nowrap">
@@ -216,7 +239,7 @@ const sourceText = (l) => {
           </select>
 
           <div class="actions">
-            <button v-if="l.needs_review && l.card" class="btn small primary" @click="patch(l, { accepted: true })">Looks right</button>
+            <button v-if="l.needs_review && l.card && !unsure(l)" class="btn small primary" @click="patch(l, { accepted: true })">Looks right</button>
             <button class="btn small danger" @click="removeLine(l)" :aria-label="`Remove ${l.card?.name || l.raw_name}`">Remove</button>
           </div>
         </div>

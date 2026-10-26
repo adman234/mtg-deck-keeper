@@ -20,6 +20,7 @@ router = APIRouter(prefix="/api/scans", tags=["scans"])
 MAX_PHOTOS = 30
 MAX_PHOTO_BYTES = 30 * 1024 * 1024
 BOARDS = {"main", "side", "commander", "maybe"}
+LAYOUTS = ("piles", "spread")
 
 
 def _job(db: Session, job_id: int, user: User) -> ScanJob:
@@ -36,7 +37,7 @@ def _job_dir(job_id: int) -> Path:
 def job_summary(job: ScanJob) -> dict:
     return {
         "id": job.id, "name": job.name, "status": job.status, "step": job.step, "error": job.error,
-        "prepass": job.prepass, "model": job.model, "deck_id": job.deck_id,
+        "prepass": job.prepass, "layout": job.layout, "model": job.model, "deck_id": job.deck_id,
         "total_images": job.total_images, "processed_images": job.processed_images,
         "created_at": job.created_at.isoformat(),
         "finished_at": job.finished_at.isoformat() if job.finished_at else None,
@@ -88,6 +89,7 @@ async def create_scan(
     files: list[UploadFile] = File(...),
     name: str = Form(""),
     prepass: bool = Form(True),
+    layout: str = Form("piles"),
     model: str = Form(""),
     db: Session = Depends(get_db),
     user: User = Depends(current_user),
@@ -96,9 +98,11 @@ async def create_scan(
         raise HTTPException(400, "Photo scanning is turned off in Settings")
     if not files:
         raise HTTPException(400, "Add at least one photo")
+    if layout not in LAYOUTS:
+        raise HTTPException(400, f"Layout must be one of {', '.join(LAYOUTS)}")
     if len(files) > MAX_PHOTOS:
         raise HTTPException(400, f"Upload at most {MAX_PHOTOS} photos per scan")
-    job = ScanJob(user_id=user.id, name=name.strip()[:200], prepass=prepass, model=model.strip(),
+    job = ScanJob(user_id=user.id, name=name.strip()[:200], prepass=prepass, layout=layout, model=model.strip(),
                   total_images=len(files))
     db.add(job)
     db.flush()
@@ -126,6 +130,7 @@ def get_scan(job_id: int, db: Session = Depends(get_db), user: User = Depends(cu
 
 class RerunIn(BaseModel):
     prepass: bool | None = None
+    layout: str | None = None
     model: str | None = None
 
 
@@ -136,6 +141,10 @@ def rerun(job_id: int, body: RerunIn, db: Session = Depends(get_db), user: User 
         raise HTTPException(409, "This scan is already running")
     if body.prepass is not None:
         job.prepass = body.prepass
+    if body.layout is not None:
+        if body.layout not in LAYOUTS:
+            raise HTTPException(400, f"Layout must be one of {', '.join(LAYOUTS)}")
+        job.layout = body.layout
     if body.model is not None:
         job.model = body.model.strip()
     job.status = "queued"

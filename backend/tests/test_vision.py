@@ -110,3 +110,33 @@ def test_thinking_ran_out_of_tokens_gives_actionable_error():
 def test_plain_empty_reply_mentions_mmproj():
     with pytest.raises(VisionError, match="mmproj"):
         _run(lambda r: _reply({"content": ""}))
+
+
+def test_underscores_in_names_become_spaces():
+    assert parse_cards('{"cards":[{"name":"Wirewood_Symbiote","count":3,"confidence":0.9}]}')[0].name == "Wirewood Symbiote"
+
+
+def test_piles_add_up_but_repeats_otherwise_do_not():
+    reply = '{"cards":[{"name":"Forest","count":4,"confidence":1},{"name":"Forest","count":3,"confidence":1}]}'
+    assert parse_cards(reply, add_repeats=True)[0].count == 7
+    assert parse_cards(reply)[0].count == 4
+
+
+def test_layout_picks_the_whole_photo_prompt():
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content)["messages"][1]["content"][0]["text"])
+        return _reply({"content": '{"cards":[]}'})
+
+    vision.transport = httpx.MockTransport(handler)
+    try:
+        cfg = VisionConfig(base_url="http://x/v1", model="daily")
+        for layout in ("piles", "spread"):
+            asyncio.run(vision.read_cards(cfg, b"jpeg", single_card=False, layout=layout))
+        asyncio.run(vision.read_cards(cfg, b"jpeg", single_card=True, layout="piles"))
+    finally:
+        vision.transport = None
+    assert "FRONT card" in seen[0] and "slivers" in seen[0]
+    assert "FRONT card" not in seen[1]
+    assert "single Magic card" in seen[2]
