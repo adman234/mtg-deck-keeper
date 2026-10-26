@@ -23,17 +23,33 @@ def card(rng, w=250, h=349) -> np.ndarray:
     return c
 
 
-def column(n: int, step: int = 38, drift: int = -4, seed: int = 3, tilt: bool = False) -> tuple[np.ndarray, int]:
-    """A photo with one column of n cards (the front one whole). Returns the image and n."""
+def odd_card(w=250, h=349) -> np.ndarray:
+    """A card unlike the ones in the column: unsleeved, an old brown frame (a basic land laid
+    down last, say)."""
+    c = np.empty((h, w, 3), np.uint8)
+    c[:] = (40, 70, 110)
+    cv2.rectangle(c, (0, 0), (w - 1, h - 1), (230, 235, 235), 9)  # white border
+    cv2.rectangle(c, (24, 30), (w - 25, h * 2 // 3), (150, 110, 120), -1)  # art
+    return c
+
+
+def column(n: int, step: int = 38, drift: int = -4, seed: int = 3, tilt: bool = False,
+           front_shift: int = 0, odd_front: bool = False, beside: int = 0) -> tuple[np.ndarray, int]:
+    """A photo with one column of n cards (the front one whole, front_shift to the side of where
+    the column puts it; odd_front: unlike the others), and optionally a second column of `beside`
+    cards to its left. Returns the image and n."""
     rng = np.random.default_rng(seed)
     img = np.empty((1500, 1200, 3), np.uint8)
     img[:] = (120, 70, 40)  # blue mat
     img[:] = np.clip(img.astype(int) + rng.integers(-10, 10, img.shape), 0, 255).astype(np.uint8)
     w, h = 250, 349
-    fx, fy = 480, 1500 - h - 120
-    for k in reversed(range(n)):  # back card first
-        x, y = fx + k * drift, fy - k * step
-        img[y:y + h, x:x + w] = card(rng, w, h)
+    for fx, count in ((480, n), (120, beside)):
+        fy = 1500 - h - 120
+        for k in reversed(range(count)):  # back card first
+            x, y = fx + k * drift, fy - k * step
+            if k == 0 and fx == 480:
+                x += front_shift
+            img[y:y + h, x:x + w] = odd_card(w, h) if k == 0 and fx == 480 and odd_front else card(rng, w, h)
     if tilt:
         H, W = img.shape[:2]
         M = cv2.getPerspectiveTransform(np.float32([[0, 0], [W, 0], [W, H], [0, H]]),

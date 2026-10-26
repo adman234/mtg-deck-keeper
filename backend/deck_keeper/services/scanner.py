@@ -197,6 +197,8 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
             debug["snap"] = piles.snap_boxes(cards, [f.bbox for f in outlines], [f.corners for f in outlines],
                                              shift=not crowded)
             debug["snap"]["resized"] = 0 if crowded else piles.fit_sizes(cards, [f.bbox for f in outlines], (w, h))
+            for c in cards if crowded else []:
+                c.extra["crowded"] = True
             # Every card OpenCV outlined gets read, even one the model didn't list.
             strip_quads = [np.float32(c.extra["strip"]["corners"]) for c in strips]
             unlisted = [outlines[j] for j in debug["snap"].pop("missed_index")

@@ -177,6 +177,7 @@ function toggleExpanded(l) {
   next.has(l.id) ? next.delete(l.id) : next.add(l.id);
   expanded.value = next;
 }
+const toTop = () => window.scrollTo({ top: 0, behavior: "smooth" });
 async function openRaw() {
   if (!raw.value) await toggleRaw();
   setTimeout(() => document.querySelector(".raw")?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
@@ -473,6 +474,10 @@ const titleCrop = (l) => l.sources.find((s) => s.title_url && s.title_exact)?.ti
           <span></span>
         </div>
       </div>
+      <div class="endbar">
+        <button class="btn small" @click="raw ? toggleRaw() : openRaw()">{{ raw ? "Hide raw data" : "Show raw data" }}</button>
+        <button class="btn small" @click="toTop">Back to top ↑</button>
+      </div>
 
       <form class="panel" @submit.prevent="save">
         <h2>{{ scan.status === "saved" ? "Save another copy" : "Save deck" }}</h2>
@@ -595,6 +600,10 @@ const titleCrop = (l) => l.sources.find((s) => s.title_url && s.title_exact)?.ti
           </figure>
         </div>
       </section>
+      <div class="endbar">
+        <button class="btn small" @click="raw ? toggleRaw() : openRaw()">{{ raw ? "Hide raw data" : "Show raw data" }}</button>
+        <button class="btn small" @click="toTop">Back to top ↑</button>
+      </div>
     </template>
 
     <div v-if="zoom" class="zoom" @click="zoom = null" @keydown.esc="zoom = null" tabindex="-1">
@@ -616,6 +625,7 @@ const titleCrop = (l) => l.sources.find((s) => s.title_url && s.title_exact)?.ti
 </template>
 
 <style scoped>
+.endbar { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; padding: 10px 0; border-top: 1px solid var(--line); }
 .small { font-size: 0.82rem; }
 .summary { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: center; }
 .tally { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }

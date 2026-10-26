@@ -23,6 +23,8 @@ PAD_TOP_SNAPPED = 0.05  # the box was snapped to a card OpenCV found, so it is w
 PAD_TOP_LOOSE = 0.45  # a single card's box can sit a third of a card too low (scan 12)
 TRIM_BOTTOM_LOOSE = 0.3  # ...so leave out its bottom, where the next row's title would be
 PAD_TOP_RETRY = 0.8  # second try when the first close-up had no title in it
+PAD_TOP_CROWDED = (0.1, 0.3)  # first and second try where cards overlap in rows (cascades, scan 17):
+# reaching up as far as above reads the title of the card behind instead
 PAD_SIDE = 0.04  # keep the neighbouring pile out of the close-up
 PAD_SIDE_PILE = 0.25  # but for a pile, reach far enough sideways to see the cards fanned behind
 PAD_BOTTOM = 0.05
@@ -342,6 +344,8 @@ def pads(card: vision.ReadCard, retry: bool = False) -> tuple[float, float]:
     the card below would be."""
     if card.count >= 2:
         return (PAD_TOP_RETRY if retry else PAD_TOP), PAD_BOTTOM
+    if card.extra.get("crowded"):
+        return PAD_TOP_CROWDED[retry], PAD_BOTTOM
     if card.extra.get("snapped"):
         return (PAD_TOP_RETRY if retry else PAD_TOP_SNAPPED), PAD_BOTTOM
     if card.extra.get("shift_source") == "row":  # moved in line with a found card beside it
@@ -456,6 +460,24 @@ def _neighbours(card: vision.ReadCard, others: list[vision.ReadCard]) -> list[vi
     return [o for o in others if o is not card and o.extra.get("bbox") and _cover(near, o.extra["bbox"]) > 0]
 
 
+def _above(card: vision.ReadCard, others: list[vision.ReadCard]) -> list[vision.ReadCard]:
+    """Entries boxed just above this one and overlapping it sideways (the card behind, in a row
+    of overlapping cards)."""
+    box = card.extra.get("bbox")
+    if not box:
+        return []
+    x, y, w, h = box
+    out = []
+    for o in others:
+        ob = o.extra.get("bbox")
+        if o is card or not ob:
+            continue
+        overlap = min(x + w, ob[0] + ob[2]) - max(x, ob[0])
+        if overlap > 0.5 * min(w, ob[2]) and y - 1.5 * h <= ob[1] < y:
+            out.append(o)
+    return out
+
+
 def _pattern_group(index: matching.CardIndex, card: vision.ReadCard, others: list[vision.ReadCard],
                    hit: matching.Match | None) -> list[vision.ReadCard]:
     """The single cards the whole-table read gave this same name, when there are several: often
@@ -516,6 +538,12 @@ def _judge(index: matching.CardIndex, card: vision.ReadCard, others: list[vision
             if any(h.card_id == zoom_hit.card_id for h in index.match(o.name, limit=1)):
                 return keep_photo
         group = _pattern_group(index, card, others, photo_hit)
+        if group and zoom_hit and any(getattr(_best(index, o.name), "card_id", None) == zoom_hit.card_id
+                                      for o in _above(card, others)):
+            # The close-up reached up to the title of the card behind (scan 17: a Snow-Covered
+            # Plains read as the Darksteel Plate above it, giving two Plates). A repeated name is
+            # no reason to believe it over the whole-photo read.
+            return keep_photo
         if group:
             if zoom_score >= REPEATED_TRUST:
                 return Decision(zoom.name, count, "zoom", differs, repeated=True)

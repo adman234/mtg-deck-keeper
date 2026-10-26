@@ -56,6 +56,18 @@ def test_columns_found_and_counted_even_photographed_at_an_angle():
         assert strip.shape[1] == cascades.READ_W and 40 < strip.shape[0] < 200
 
 
+def test_column_found_when_its_front_card_sits_apart_or_looks_different():
+    img, n = column(9, front_shift=55)
+    cols = cascades.find(img, [f.corners for f in detection.find_cards(img)])
+    assert [len(c.strips) for c in cols] == [n - 1]
+
+    # The front card's own top edge matches nothing behind it: the edges of the other column are used.
+    img, n = column(9, odd_front=True, beside=8)
+    found = detection.find_cards(img)
+    cols = cascades.find(img, [f.corners for f in found])
+    assert sorted(len(c.strips) for c in cols) == [7, n - 1]
+
+
 def test_separate_cards_are_not_a_column():
     img = np.full((1200, 1600, 3), (120, 70, 40), np.uint8)
     from cascade_photo import card

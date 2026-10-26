@@ -420,6 +420,29 @@ def test_repeated_whole_table_name_gives_way_to_the_close_ups():
     assert d[1].suggest == ["Forest", "Bayou"]  # what the rest of the row was read as
 
 
+def test_close_up_reading_the_card_behind_does_not_replace_a_repeated_name():
+    """Scan 17: in a cascade, a Snow-Covered Plains's close-up reached up to the Darksteel Plate
+    behind it. The repeated name mustn't make the close-up win (two Plates, one Plains short)."""
+    from deck_keeper.services.matching import CardIndex
+    index = CardIndex([(1, "Snow-Covered Plains"), (2, "Darksteel Plate"), (3, "Rout")])
+    plate, plains, other, third = (_card(n, count=1) for n in ("Darksteel Plate", *["Snow-Covered Plains"] * 3))
+    for e, box in zip((plate, plains, other, third), ([500, 400, 300, 60], [505, 450, 300, 60], [900, 450, 300, 60],
+                                                      [1300, 450, 300, 60])):
+        e.extra["bbox"] = box
+    plains.extra["zoom"] = vision.ZoomRead("Darksteel Plate", 1, 0.9, "{}")
+    other.extra["zoom"] = vision.ZoomRead("Rout", 1, 0.9, "{}")
+    entries = [plate, plains, other, third]
+    assert piles.decide(index, plains, entries).name == "Snow-Covered Plains"
+    assert piles.decide(index, other, entries).name == "Rout"  # nothing above it reads Rout
+
+
+def test_close_ups_in_crowded_photos_stay_off_the_title_above():
+    card = _card("Rout", count=1)
+    card.extra["crowded"] = True
+    assert piles.pads(card) == (piles.PAD_TOP_CROWDED[0], piles.PAD_BOTTOM)
+    assert piles.pads(card, retry=True)[0] < piles.PAD_TOP_LOOSE
+
+
 def test_close_up_reading_the_card_below_keeps_the_whole_table_name():
     """Scan 12: Craterhoof's box sat low and the close-up read Once Upon a Time, the card below."""
     from deck_keeper.services.matching import CardIndex
