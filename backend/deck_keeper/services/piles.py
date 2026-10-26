@@ -32,6 +32,7 @@ DUPLICATE_IOU = 0.6
 ZOOM_MAX_SIDE = 1024
 SNAP_IOU = 0.3  # a model box and a card OpenCV found overlapping this much are the same card
 SNAP_COVER = 0.7  # or, for a pile, when the found (front) card lies this much inside the box
+ROW_X_OVERLAP = 0.5  # in the same row, a box and a found card overlapping this much across are one card
 STRONG_MATCH = 80.0  # both reads name a real card this convincingly: ask the model to choose
 NEIGHBOUR_MATCH = 75.0
 PATTERN_FILL = 3  # one name given to this many single cards in a photo is the model repeating itself
@@ -86,57 +87,127 @@ def _edges(b: list[int]) -> np.ndarray:
     return np.array([b[0], b[1], b[0] + b[2], b[1] + b[3]], dtype=float)
 
 
-def snap_boxes(cards: list[vision.ReadCard], found: list[list[int]]) -> dict:
-    """Move the model's boxes onto the cards OpenCV found.
+def _rows(boxes: list[list[int]]) -> list[list[int]]:
+    """Group boxes into rows, top to bottom (lists of indices). A box joins the row above when its
+    centre is within half a typical box height of that row's centre."""
+    if not boxes:
+        return []
+    half = float(np.median([b[3] for b in boxes])) / 2
+    rows: list[list[int]] = []
+    centres: list[list[float]] = []
+    for i in sorted(range(len(boxes)), key=lambda i: boxes[i][1] + boxes[i][3] / 2):
+        cy = boxes[i][1] + boxes[i][3] / 2
+        if rows and abs(cy - float(np.mean(centres[-1]))) < half:
+            rows[-1].append(i)
+            centres[-1].append(cy)
+        else:
+            rows.append([i])
+            centres.append([cy])
+    return rows
 
-    The model's boxes are rough: in scan 12 whole rows sat a third of a card too low, so the
-    close-ups missed the titles. A single card's box is replaced by the found card; a pile's box
-    is widened to take in its found front card. Single cards with no found card are shifted by
-    the median correction of the snapped single cards (those in the same row if any), since the
-    model's error is much the same for neighbours. The model's own box is kept as
-    extra["model_bbox"]. Returns a summary for the debug view.
-    """
-    boxed = [c for c in cards if c.extra.get("bbox")]
+
+def _x_overlap(a: list[int], b: list[int]) -> float:
+    inter = max(0, min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0]))
+    return inter / max(1, min(a[2], b[2]))
+
+
+def _pair_by_rows(model: list[list[int]], found: list[list[int]],
+                  model_rows: list[list[int]]) -> list[tuple[int, int]] | None:
+    """Pair the n-th row of model boxes with the n-th row of found cards, then within a row by
+    horizontal overlap. The model places cards across a row well but can be far off down the
+    photo (scan 13: its three rows were squashed into the middle half), so overlap alone pairs
+    boxes with the row above. Returns None when the row counts differ."""
+    found_rows = _rows(found)
+    if not model_rows or len(model_rows) != len(found_rows):
+        return None
     pairs = []
-    for i, c in enumerate(boxed):
+    for mr, fr in zip(model_rows, found_rows):
+        used_m, used_f = set(), set()
+        for ov, i, j in sorted(((_x_overlap(model[i], found[j]), i, j) for i in mr for j in fr), reverse=True):
+            if ov < ROW_X_OVERLAP or i in used_m or j in used_f:
+                continue
+            used_m.add(i)
+            used_f.add(j)
+            pairs.append((i, j))
+    return pairs
+
+
+def _pair_by_overlap(cards: list[vision.ReadCard], found: list[list[int]]) -> list[tuple[int, int]]:
+    scored = []
+    for i, c in enumerate(cards):
         for j, f in enumerate(found):
             iou = _iou(c.extra["bbox"], f)
             if iou >= SNAP_IOU or (c.count >= 2 and _cover(c.extra["bbox"], f) >= SNAP_COVER):
-                pairs.append((iou, i, j))
-    used_cards, used_found = set(), set()
-    deltas: list[tuple[float, np.ndarray]] = []  # (centre y, edge corrections) of snapped singles
-    for _, i, j in sorted(pairs, reverse=True):
-        if i in used_cards or j in used_found:
-            continue
-        used_cards.add(i)
-        used_found.add(j)
-        c, f = boxed[i], found[j]
+                scored.append((iou, i, j))
+    pairs, used_m, used_f = [], set(), set()
+    for _, i, j in sorted(scored, reverse=True):
+        if i not in used_m and j not in used_f:
+            used_m.add(i)
+            used_f.add(j)
+            pairs.append((i, j))
+    return pairs
+
+
+def snap_boxes(cards: list[vision.ReadCard], found: list[list[int]]) -> dict:
+    """Move the model's boxes onto the cards OpenCV found.
+
+    The model's boxes are rough: in scans 12 and 13 whole rows sat a third of a card or more too
+    low, so the close-ups missed the titles. A single card's box is replaced by its found card; a
+    pile's box is widened to take in its found front card. Single cards with no found card are
+    moved by the median correction of the snapped single cards in their row (the model's error
+    is much the same along a row), or failing that by an estimate from the other rows. The
+    model's own box is kept as extra["model_bbox"]. Returns a summary for the debug view.
+    """
+    boxed = [c for c in cards if c.extra.get("bbox")]
+    model = [c.extra["bbox"] for c in boxed]
+    model_rows = _rows(model)
+    row_of = {i: r for r, row in enumerate(model_rows) for i in row}
+    pairs = _pair_by_rows(model, found, model_rows) if found else []
+    matched_by = "rows"
+    if pairs is None:
+        pairs, matched_by = _pair_by_overlap(boxed, found), "overlap"
+
+    by_row: dict[int, list[np.ndarray]] = {}
+    for i, j in pairs:
+        c, f = boxed[i], list(found[j])
         c.extra["model_bbox"] = c.extra["bbox"]
         c.extra["snapped"] = True
         if c.count >= 2:
-            c.extra["bbox"] = _union(c.extra["bbox"], list(f))
+            c.extra["bbox"] = _union(c.extra["bbox"], f)
         else:
-            deltas.append((f[1] + f[3] / 2, _edges(f) - _edges(c.extra["model_bbox"])))
-            c.extra["bbox"] = list(f)
+            by_row.setdefault(row_of[i], []).append(_edges(f) - _edges(c.extra["model_bbox"]))
+            c.extra["bbox"] = f
+    row_delta = {r: np.median(ds, axis=0) for r, ds in by_row.items()}
+    centre = {r: float(np.mean([model[i][1] + model[i][3] / 2 for i in row])) for r, row in enumerate(model_rows)}
+
     shifted = 0
-    if len(deltas) >= 2:
-        for i, c in enumerate(boxed):
-            if i in used_cards or c.count >= 2:
-                continue  # a pile's box covers cards fanned out behind, unlike any found card
-            x, y, w, h = c.extra["bbox"]
-            row = [d for cy, d in deltas if abs(cy - (y + h / 2)) < h / 2]
-            d = np.median(row or [d for _, d in deltas], axis=0)
-            if abs(d[1]) > h * 0.6 or abs(d[0]) > w * 0.6:
-                continue  # too big to be the same kind of error; leave it alone
-            e = _edges(c.extra["bbox"]) + d
-            if e[2] - e[0] < w * 0.5 or e[3] - e[1] < h * 0.5:
-                continue
-            c.extra["model_bbox"] = c.extra["bbox"]
-            c.extra["bbox"] = [round(e[0]), round(e[1]), round(e[2] - e[0]), round(e[3] - e[1])]
-            c.extra["shifted"] = [round(v) for v in d]
-            shifted += 1
-    return {"found": [list(f) for f in found], "snapped": len(used_cards), "shifted": shifted,
-            "missed": [list(found[j]) for j in range(len(found)) if j not in used_found]}
+    snapped = {i for i, _ in pairs}
+    for i, c in enumerate(boxed):
+        if i in snapped or c.count >= 2:
+            continue  # a pile's box covers cards fanned out behind, unlike any found card
+        r = row_of[i]
+        if r in row_delta:
+            d, source = row_delta[r], "row"
+        elif len(row_delta) >= 2:
+            # No found card in this row: carry the other rows' corrections across, in proportion.
+            ys = [centre[k] for k in row_delta]
+            d = np.array([np.polyval(np.polyfit(ys, [row_delta[k][n] for k in row_delta], 1), centre[r])
+                          for n in range(4)])
+            source = "estimate"
+        else:
+            continue
+        x, y, w, h = c.extra["bbox"]
+        e = _edges(c.extra["bbox"]) + d
+        if e[2] - e[0] < w * 0.5 or e[3] - e[1] < h * 0.5 or np.abs(d).max() > 2 * max(w, h):
+            continue  # not the same kind of error; leave it alone
+        c.extra["model_bbox"] = c.extra["bbox"]
+        c.extra["bbox"] = [round(e[0]), round(e[1]), round(e[2] - e[0]), round(e[3] - e[1])]
+        c.extra["shifted"] = [round(v) for v in d]
+        c.extra["shift_source"] = source
+        shifted += 1
+    used = {j for _, j in pairs}
+    return {"found": [list(f) for f in found], "matched_by": matched_by, "snapped": len(pairs), "shifted": shifted,
+            "missed": [list(found[j]) for j in range(len(found)) if j not in used]}
 
 
 def drop_duplicates(cards: list[vision.ReadCard]) -> tuple[list[vision.ReadCard], list[vision.ReadCard]]:
@@ -169,13 +240,15 @@ def crop_region(img_size: tuple[int, int], bbox: list[int], top: float = PAD_TOP
 
 
 def pads(card: vision.ReadCard, retry: bool = False) -> tuple[float, float]:
-    """(top, bottom) room for a close-up. A single card whose box wasn't snapped to a found card
-    may be boxed too low: reach well up for its title and leave out the bottom, where the title of
+    """(top, bottom) room for a close-up. A single card whose box wasn't lined up with a found card
+    (directly or by one in its row) may be boxed too low: reach well up for its title and leave out the bottom, where the title of
     the card below would be."""
     if card.count >= 2:
         return (PAD_TOP_RETRY if retry else PAD_TOP), PAD_BOTTOM
     if card.extra.get("snapped"):
         return (PAD_TOP_RETRY if retry else PAD_TOP_SNAPPED), PAD_BOTTOM
+    if card.extra.get("shift_source") == "row":  # moved in line with a found card beside it
+        return (PAD_TOP_RETRY if retry else PAD_TOP), PAD_BOTTOM
     return (PAD_TOP_RETRY if retry else PAD_TOP_LOOSE), -TRIM_BOTTOM_LOOSE
 
 
@@ -262,20 +335,41 @@ def _neighbours(card: vision.ReadCard, others: list[vision.ReadCard]) -> list[vi
     return [o for o in others if o is not card and o.extra.get("bbox") and _cover(near, o.extra["bbox"]) > 0]
 
 
-def _pattern_fill(index: matching.CardIndex, card: vision.ReadCard, others: list[vision.ReadCard],
-                  hit: matching.Match | None) -> bool:
-    """The whole-table read gave this name to several single cards: often it read one and
-    repeated it along the row (scan 12: four "Misty Rainforest" for a Forest and three Bayous)."""
+def _pattern_group(index: matching.CardIndex, card: vision.ReadCard, others: list[vision.ReadCard],
+                   hit: matching.Match | None) -> list[vision.ReadCard]:
+    """The single cards the whole-table read gave this same name, when there are several: often
+    it read one and repeated it along the row (scan 12: four "Misty Rainforest" for a Forest and
+    three Bayous; scan 13: four "Meticulous Artisan"). Empty when the name isn't repeated."""
     if card.count >= 2 or hit is None:
-        return False
+        return []
     same = [o for o in others if o.count == 1 and (o.name.casefold() == card.name.casefold()
                                                    or getattr(_best(index, o.name), "card_id", None) == hit.card_id)]
-    return len(same) >= PATTERN_FILL
+    return same if len(same) >= PATTERN_FILL else []
 
 
-def _judge(index: matching.CardIndex, card: vision.ReadCard, others: list[vision.ReadCard]) -> Decision | list[str]:
-    """Pick between the whole-photo read and the close-up read of one entry, or return the two
-    card names to ask the model to choose between."""
+@dataclass
+class Ask:
+    """Ask the model which of these cards the close-up shows; until then, go with fallback."""
+    options: list[str]
+    fallback: Decision
+
+
+def _ask_or_pick(card: vision.ReadCard, options: list[str], fallback: Decision,
+                 photo_hit: matching.Match) -> Decision | Ask:
+    picked = card.extra.get("tiebreak")
+    if picked is None:
+        return Ask(options, fallback)
+    name = picked.get("name")
+    if name not in options:
+        # The model couldn't choose ("none"), so the close-up most likely isn't of this card at
+        # all: keep the whole-table name, flagged.
+        return fallback
+    return Decision(name, fallback.count, "photo" if name == photo_hit.name else "zoom", fallback.count_differs)
+
+
+def _judge(index: matching.CardIndex, card: vision.ReadCard, others: list[vision.ReadCard]) -> Decision | Ask:
+    """Pick between the whole-photo read and the close-up read of one entry, or say which card
+    names to ask the model to choose between."""
     zoom: vision.ZoomRead | None = card.extra.get("zoom")
     if zoom is None:
         return Decision(card.name, card.count, "photo", False)
@@ -288,36 +382,36 @@ def _judge(index: matching.CardIndex, card: vision.ReadCard, others: list[vision
     photo_hit, zoom_hit = _best(index, card.name), _best(index, zoom.name)
     photo_score = photo_hit.score if photo_hit else 0.0
     zoom_score = zoom_hit.score if zoom_hit else 0.0
-    if zoom_hit and (not photo_hit or zoom_hit.card_id != photo_hit.card_id):
+    keep_photo = Decision(photo_hit.name if photo_hit and photo_score >= STRONG_MATCH else card.name,
+                          count, "photo", differs, unsure=True)
+    if not (zoom_hit and photo_hit and zoom_hit.card_id == photo_hit.card_id):
         # The close-up names a different card. If an overlapping entry is that card, this box was
         # probably drawn over the neighbouring pile, so keep the whole-photo read.
         box = card.extra.get("bbox")
         for o in others:
-            if o is card or not box or not o.extra.get("bbox") or _iou(box, o.extra["bbox"]) < OVERLAP_GUARD:
+            if not zoom_hit or o is card or not box or not o.extra.get("bbox") or _iou(box, o.extra["bbox"]) < OVERLAP_GUARD:
                 continue
             if any(h.card_id == zoom_hit.card_id for h in index.match(o.name, limit=1)):
-                return Decision(card.name, count, "photo", differs, unsure=True)
-        if _pattern_fill(index, card, others, photo_hit):
+                return keep_photo
+        group = _pattern_group(index, card, others, photo_hit)
+        if group:
             if zoom_score >= STRONG_MATCH:
                 return Decision(zoom.name, count, "zoom", differs)
-            return Decision(card.name, count, "photo", differs, unsure=True)
-        if photo_score >= NEIGHBOUR_MATCH:
+            # The repeated name is likely wrong and the close-up is no help either. The close-ups
+            # of the others with that name show which cards the row really holds: ask which.
+            options = [photo_hit.name]
+            for o in group:
+                hit = _best(index, getattr(o.extra.get("zoom"), "name", ""))
+                if hit and hit.score >= STRONG_MATCH and hit.name not in options:
+                    options.append(hit.name)
+            return _ask_or_pick(card, options, keep_photo, photo_hit) if len(options) > 1 else keep_photo
+        if zoom_hit and photo_score >= NEIGHBOUR_MATCH:
             # The close-up read the title of the card next to it (its box sat over the gap).
             for o in _neighbours(card, others):
                 if getattr(_best(index, o.name), "card_id", None) == zoom_hit.card_id:
-                    return Decision(card.name, count, "photo", differs, unsure=True)
+                    return keep_photo
         if photo_hit and photo_score >= STRONG_MATCH and zoom_score >= STRONG_MATCH:
-            picked = card.extra.get("tiebreak")
-            if picked is None:
-                return [photo_hit.name, zoom_hit.name]
-            if picked.get("name") == photo_hit.name:
-                return Decision(photo_hit.name, count, "photo", differs)
-            if picked.get("name") == zoom_hit.name:
-                return Decision(zoom_hit.name, count, "zoom", differs)
-            # The model couldn't choose: fall through to the usual rule, flagged.
-            if zoom_score >= photo_score - 5:
-                return Decision(zoom.name, count, "zoom", differs, unsure=True)
-            return Decision(card.name, count, "photo", differs, unsure=True)
+            return _ask_or_pick(card, [photo_hit.name, zoom_hit.name], keep_photo, photo_hit)
     if zoom_score >= photo_score - 5:
         return Decision(zoom.name, count, "zoom", differs)
     return Decision(card.name, count, "photo", differs)
@@ -326,19 +420,14 @@ def _judge(index: matching.CardIndex, card: vision.ReadCard, others: list[vision
 def decide(index: matching.CardIndex, card: vision.ReadCard, others: list[vision.ReadCard]) -> Decision:
     """Pick between the whole-photo read and the close-up read of one entry."""
     result = _judge(index, card, others)
-    if isinstance(result, Decision):
-        return result
-    # Two real cards and nobody asked the model to choose (or it couldn't be reached): the
-    # close-up usually sees the title better, but say so.
-    zoom = card.extra["zoom"]
-    count, differs = combine_counts(card.count, zoom.count)
-    return Decision(zoom.name, count, "zoom", differs, unsure=True)
+    return result.fallback if isinstance(result, Ask) else result
 
 
 async def settle(img: np.ndarray, cards: list[vision.ReadCard], index: matching.CardIndex,
                  cfg: vision.VisionConfig, sem: asyncio.Semaphore) -> None:
-    """Where the whole-table read and the close-up name two different real cards, show the model
-    a taller close-up and ask which of the two it is (stored as extra["tiebreak"])."""
+    """Where the whole-table read and the close-up name different real cards, or a repeated
+    whole-table name has an unreadable close-up, show the model a taller close-up and ask which
+    card it is (stored as extra["tiebreak"])."""
     async def one(card: vision.ReadCard, options: list[str]) -> None:
         top, bottom = pads(card, retry=True)
         ok, buf = cv2.imencode(".jpg", _crop(img, card.extra["bbox"], top, card.count >= 2, bottom),
@@ -352,6 +441,6 @@ async def settle(img: np.ndarray, cards: list[vision.ReadCard], index: matching.
 
     asks = []
     for card in cards:
-        if card.extra.get("bbox") and isinstance(options := _judge(index, card, cards), list):
-            asks.append(one(card, options))
+        if card.extra.get("bbox") and isinstance(ask := _judge(index, card, cards), Ask):
+            asks.append(one(card, ask.options))
     await asyncio.gather(*asks)

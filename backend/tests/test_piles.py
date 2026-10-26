@@ -350,11 +350,49 @@ def test_scan_12_boxes_are_lined_up_with_the_cards_opencv_found():
     assert dryad.extra["bbox"] == [1516, 901, 394, 460]  # pile widened to take in its front card
 
 
-def test_snapping_needs_two_found_cards_to_move_the_rest():
+def test_one_found_card_moves_its_own_row_only():
     entries = _lands_entries()
-    piles.snap_boxes(entries, LANDS_FOUND[4:5])
+    info = piles.snap_boxes(entries, LANDS_FOUND[4:5])
+    assert info["matched_by"] == "overlap"  # 3 rows of boxes, 1 row of found cards
     assert entries[6].extra["model_bbox"] == [990, 509, 276, 377]
-    assert not any(e.extra.get("shifted") for e in entries)
+    assert [e.extra.get("shift_source") for e in entries[4:8]] == ["row", "row", None, "row"]
+    assert not any(e.extra.get("shifted") for e in entries[:4])
+
+
+def test_scan_13_squashed_rows_are_matched_row_by_row():
+    """Scan 13, 15 sleeved singles in 3 rows: the model's rows were squashed into the middle of
+    the photo, so its third row overlapped the real second row more than the third."""
+    found = [[1014, 184, 387, 498], [1779, 204, 369, 472], [1021, 707, 375, 507], [1414, 699, 399, 521],
+             [1800, 703, 396, 517], [1034, 1260, 395, 568], [619, 1269, 375, 546], [1846, 1254, 400, 548]]
+    xs = [(225, 387), (619, 391), (1017, 391), (1413, 324), (1744, 394)]
+    entries = []
+    for y in (352, 630, 910):
+        for x, w in xs:
+            c = _card("x", count=1)
+            c.extra["bbox"] = [x, y, w, 259]
+            entries.append(c)
+    info = piles.snap_boxes(entries, found)
+    assert info["matched_by"] == "rows" and info["snapped"] == 8 and info["missed"] == []
+    assert entries[12].extra["bbox"] == [1034, 1260, 395, 568]  # row 3 box on the row 3 card
+    for row, (top, bottom) in enumerate([(184, 682), (699, 1220), (1254, 1828)]):
+        for e in entries[row * 5:row * 5 + 5]:
+            y, h = e.extra["bbox"][1], e.extra["bbox"][3]
+            assert top - 15 <= y and y + h <= bottom + 15, (row, e.extra)
+    assert entries[0].extra["shift_source"] == "row" and piles.pads(entries[0]) == (piles.PAD_TOP, piles.PAD_BOTTOM)
+
+
+def test_row_with_no_found_card_is_estimated_from_the_others():
+    found = [[100, 100, 200, 280], [400, 700, 200, 280]]
+    entries = []
+    for y in (150, 450, 750):
+        c = _card("x", count=1)
+        c.extra["bbox"] = [100, y, 200, 200]
+        entries.append(c)
+    entries[2].extra["bbox"] = [400, 750, 200, 200]
+    piles.snap_boxes(entries, found)
+    middle = entries[1]
+    assert middle.extra["shift_source"] == "estimate" and middle.extra["bbox"][1] == 400
+    assert piles.pads(middle) == (piles.PAD_TOP_LOOSE, -piles.TRIM_BOTTOM_LOOSE)
 
 
 def test_close_up_of_a_loose_box_reaches_up_and_leaves_out_the_next_title():
@@ -433,3 +471,42 @@ def test_agreeing_reads_are_not_asked_again():
     finally:
         vision.transport = None
     assert "tiebreak" not in card.extra
+
+
+def test_model_unable_to_choose_keeps_the_whole_table_name():
+    """Scan 13: whole table "Abrupt Decay" (right); the close-up, still over the card above, read
+    "Naturalize". Asked to choose, the model said neither, so the close-up wasn't of this card."""
+    from deck_keeper.services.matching import CardIndex
+    index = CardIndex([(1, "Abrupt Decay"), (2, "Naturalize")])
+    card = _card("Abrupt Decay", count=1)
+    card.extra["bbox"] = [602, 911, 394, 261]
+    card.extra["zoom"] = vision.ZoomRead("Naturalize", 1, 1.0, "{}")
+    card.extra["tiebreak"] = {"options": ["Abrupt Decay", "Naturalize"], "name": "none", "confidence": 0.5}
+    d = piles.decide(index, card, [card])
+    assert (d.name, d.used, d.unsure) == ("Abrupt Decay", "photo", True)
+
+
+def test_repeated_name_with_unreadable_close_up_asks_among_the_rows_cards(tmp_path):
+    """Scan 13: four "Meticulous Artisan" for a Forest and three Bayous. One close-up read
+    "Joraga"; the others read Forest and Bayou, so the model is asked to choose among those."""
+    import numpy as np
+    from deck_keeper.services.matching import CardIndex
+    index = CardIndex([(1, "Meticulous Artisan"), (2, "Forest"), (3, "Bayou"), (4, "Joraga Treespeaker")])
+    entries = [_card("Meticulous Artisan", count=1) for _ in range(4)]
+    for i, (e, z) in enumerate(zip(entries, ["Foreste", "Joraga", "Bayou", "Bayou"])):
+        e.extra["bbox"] = [i * 360, 520, 350, 476]
+        e.extra["zoom"] = vision.ZoomRead(z, 1, 1.0, "{}")
+    asked = []
+
+    def model(request):
+        asked.append(json.loads(request.content)["response_format"]["json_schema"]["schema"]["properties"]["name"]["enum"])
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"name": "Forest", "confidence": 0.9})}}]})
+
+    vision.transport = httpx.MockTransport(model)
+    try:
+        asyncio.run(piles.settle(np.full((1807, 2400, 3), 90, np.uint8), entries, index,
+                                 vision.VisionConfig(base_url="http://x/v1", model="daily"), asyncio.Semaphore(1)))
+    finally:
+        vision.transport = None
+    assert asked == [["Meticulous Artisan", "Forest", "Bayou", "none"]]
+    assert [piles.decide(index, e, entries).name for e in entries] == ["Foreste", "Forest", "Bayou", "Bayou"]
