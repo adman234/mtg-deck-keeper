@@ -18,7 +18,11 @@ from . import matching, vision
 
 log = logging.getLogger(__name__)
 
-PAD = 0.12  # grow each box by this much per side: models draw tight or slightly off boxes
+PAD_TOP = 0.15  # models often start the box a little below the title bar
+PAD_TOP_RETRY = 0.6  # second try when the first close-up had no title in it
+PAD_SIDE = 0.04  # keep the neighbouring pile out of the close-up
+PAD_BOTTOM = 0.05
+OVERLAP_GUARD = 0.3
 MIN_SIDE = 0.02  # boxes thinner than this (fraction of the photo) are noise
 DUPLICATE_IOU = 0.6
 ZOOM_MAX_SIDE = 1024
@@ -71,12 +75,13 @@ def drop_duplicates(cards: list[vision.ReadCard]) -> tuple[list[vision.ReadCard]
     return kept, dropped
 
 
-def _crop(img: np.ndarray, bbox: list[int]) -> np.ndarray:
+def _crop(img: np.ndarray, bbox: list[int], top: float = PAD_TOP) -> np.ndarray:
+    """Cut a box out with extra room above (models often start the box below the title bar)
+    and little at the sides (where the neighbouring pile is)."""
     h, w = img.shape[:2]
     x, y, bw, bh = bbox
-    px, py = bw * PAD, bh * PAD
-    x1, y1 = int(max(0, x - px)), int(max(0, y - py))
-    x2, y2 = int(min(w, x + bw + px)), int(min(h, y + bh + py))
+    x1, x2 = int(max(0, x - bw * PAD_SIDE)), int(min(w, x + bw * (1 + PAD_SIDE)))
+    y1, y2 = int(max(0, y - bh * top)), int(min(h, y + bh * (1 + PAD_BOTTOM)))
     crop = img[y1:y2, x1:x2]
     scale = min(1.0, ZOOM_MAX_SIDE / max(crop.shape[:2]))
     if scale < 1:
@@ -89,16 +94,27 @@ async def zoom_in(img: np.ndarray, cards: list[vision.ReadCard], crop_dir: Path,
     """Save a close-up of every boxed entry and re-read it (stored as extra["zoom"])."""
     crop_dir.mkdir(exist_ok=True)
 
-    async def one(i: int, card: vision.ReadCard) -> None:
-        crop = _crop(img, card.extra["bbox"])
-        path = crop_dir / f"{stem}-pile-{i:03d}.jpg"
-        ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    async def read(i: int, card: vision.ReadCard, top: float, suffix: str) -> vision.ZoomRead | None:
+        ok, buf = cv2.imencode(".jpg", _crop(img, card.extra["bbox"], top), [cv2.IMWRITE_JPEG_QUALITY, 90])
         if not ok:
-            return
+            return None
+        path = crop_dir / f"{stem}-pile-{i:03d}{suffix}.jpg"
         path.write_bytes(buf.tobytes())
-        card.extra["crop_path"] = str(path)
         async with sem:
-            card.extra["zoom"] = await vision.read_pile(cfg, buf.tobytes(), hint=card.name)
+            result = await vision.read_pile(cfg, buf.tobytes())
+        if result is not None and (result.name or "crop_path" not in card.extra):
+            card.extra["crop_path"] = str(path)
+        return result
+
+    async def one(i: int, card: vision.ReadCard) -> None:
+        result = await read(i, card, PAD_TOP, "")
+        if result is not None and not result.name:
+            # No title in view: the box most likely starts below it. Try once with more room above.
+            retry = await read(i, card, PAD_TOP_RETRY, "-tall")
+            if retry is not None:
+                retry.retried = True
+                result = retry if retry.name else result
+        card.extra["zoom"] = result
 
     await asyncio.gather(*(one(i, c) for i, c in enumerate(cards) if c.extra.get("bbox")))
 
@@ -109,6 +125,7 @@ class Decision:
     count: int
     used: str  # photo | zoom
     count_differs: bool
+    unsure: bool = False  # the close-up couldn't confirm the name
 
 
 def decide(index: matching.CardIndex, card: vision.ReadCard, others: list[vision.ReadCard]) -> Decision:
@@ -116,10 +133,14 @@ def decide(index: matching.CardIndex, card: vision.ReadCard, others: list[vision
     zoom: vision.ZoomRead | None = card.extra.get("zoom")
     if zoom is None:
         return Decision(card.name, card.count, "photo", False)
-    count = zoom.count or card.count
     differs = zoom.count is not None and zoom.count != card.count
+    # When the two counts disagree, the whole-table read was right more often: close-ups tend
+    # to count sleeve edges and the edge of the next pile. Take the lower one and flag it.
+    count = min(zoom.count, card.count) if differs else card.count
     if not zoom.name:
-        return Decision(card.name, count, "photo", differs)
+        # The close-up couldn't see a title, so the whole-table name is unconfirmed (and is
+        # where made-up names come from).
+        return Decision(card.name, count, "photo", differs, unsure=True)
 
     def best(name: str) -> matching.Match | None:
         hits = index.match(name, limit=1)
@@ -129,11 +150,14 @@ def decide(index: matching.CardIndex, card: vision.ReadCard, others: list[vision
     photo_score = photo_hit.score if photo_hit else 0.0
     zoom_score = zoom_hit.score if zoom_hit else 0.0
     if zoom_hit and (not photo_hit or zoom_hit.card_id != photo_hit.card_id):
-        # The close-up names a different card. If that card is another entry in this photo,
-        # the box was probably drawn around the wrong pile, so trust the whole-photo read.
-        other_ids = {h.card_id for o in others if o is not card for h in index.match(o.name, limit=1)}
-        if zoom_hit.card_id in other_ids:
-            return Decision(card.name, card.count, "photo", True)
+        # The close-up names a different card. If an overlapping entry is that card, this box was
+        # probably drawn over the neighbouring pile, so keep the whole-photo read.
+        box = card.extra.get("bbox")
+        for o in others:
+            if o is card or not box or not o.extra.get("bbox") or _iou(box, o.extra["bbox"]) < OVERLAP_GUARD:
+                continue
+            if any(h.card_id == zoom_hit.card_id for h in index.match(o.name, limit=1)):
+                return Decision(card.name, count, "photo", True)
     if zoom_score >= photo_score - 5:
         return Decision(zoom.name, count, "zoom", differs)
     return Decision(card.name, count, "photo", differs)

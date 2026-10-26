@@ -145,6 +145,7 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
     return _ImageResult(len(found), reads, photo_cards, photo_error, debug)
 
 
+UNCONFIRMED_CONFIDENCE = 0.4  # name only from the whole-table read; the close-up saw no title
 WEAK_CROP_SCORE = 85.0
 WEAK_CROP_CONFIDENCE = 0.6
 
@@ -308,9 +309,12 @@ async def process_job(job_id: int) -> None:
                         zoom = r.card.extra.get("zoom")
                         raw = {"photo": r.card.extra.get("raw"), "used": choice.used,
                                "count_differs": choice.count_differs,
-                               "zoom": zoom and {"name": zoom.name, "count": zoom.count,
+                               "unsure": choice.unsure,
+                               "zoom": zoom and {"name": zoom.name, "count": zoom.count, "retried": zoom.retried,
                                                  "confidence": zoom.confidence, "reply": zoom.raw}}
                         conf = zoom.confidence if choice.used == "zoom" and zoom else r.card.confidence
+                        if choice.unsure:
+                            conf = min(conf, UNCONFIRMED_CONFIDENCE)
                         card = vision.ReadCard(name=choice.name, count=choice.count, confidence=conf,
                                                set=r.card.set, collector_number=r.card.collector_number)
                     res = await resolver.resolve(db, matching.get_index(db), card, r.crop_path, cfg, opts, ask)

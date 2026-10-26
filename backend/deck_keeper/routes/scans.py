@@ -20,7 +20,7 @@ router = APIRouter(prefix="/api/scans", tags=["scans"])
 MAX_PHOTOS = 30
 MAX_PHOTO_BYTES = 30 * 1024 * 1024
 BOARDS = {"main", "side", "commander", "maybe"}
-LAYOUTS = ("piles", "spread")
+LAYOUTS = ("auto", "piles", "spread")  # all read the same way now; kept for older clients
 
 
 def _job(db: Session, job_id: int, user: User) -> ScanJob:
@@ -90,7 +90,7 @@ async def create_scan(
     files: list[UploadFile] = File(...),
     name: str = Form(""),
     prepass: bool = Form(True),
-    layout: str = Form("piles"),
+    layout: str = Form("auto"),
     model: str = Form(""),
     db: Session = Depends(get_db),
     user: User = Depends(current_user),

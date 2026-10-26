@@ -123,7 +123,7 @@ def test_piles_stay_separate_but_repeats_otherwise_do_not_add_up():
     assert [c.count for c in parse_cards(reply)] == [4]
 
 
-def test_layout_picks_the_whole_photo_prompt():
+def test_one_prompt_for_singles_and_piles():
     seen = []
 
     def handler(request):
@@ -133,11 +133,12 @@ def test_layout_picks_the_whole_photo_prompt():
     vision.transport = httpx.MockTransport(handler)
     try:
         cfg = VisionConfig(base_url="http://x/v1", model="daily")
-        for layout in ("piles", "spread"):
+        for layout in ("auto", "piles", "spread"):
             asyncio.run(vision.read_cards(cfg, b"jpeg", single_card=False, layout=layout))
-        asyncio.run(vision.read_cards(cfg, b"jpeg", single_card=True, layout="piles"))
+        asyncio.run(vision.read_cards(cfg, b"jpeg", single_card=True))
     finally:
         vision.transport = None
-    assert "FRONT card" in seen[0] and "slivers" in seen[0]
-    assert "FRONT card" not in seen[1]
-    assert "single Magic card" in seen[2]
+    assert seen[0] == seen[1] == seen[2]
+    assert "every separate card and every pile" in seen[0] and "Count cards, not edges" in seen[0]
+    assert "most common" not in seen[0]  # this nudged piles of 2 up to 4
+    assert "single Magic card" in seen[3]

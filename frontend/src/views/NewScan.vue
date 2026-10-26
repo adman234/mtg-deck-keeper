@@ -7,7 +7,6 @@ const router = useRouter();
 const files = ref([]);
 const name = ref("");
 const prepass = ref(true);
-const layout = ref("piles");
 const model = ref("");
 const error = ref("");
 const busy = ref(false);
@@ -49,7 +48,6 @@ async function submit() {
   files.value.forEach((f) => form.append("files", f.file, f.file.name));
   form.append("name", name.value);
   form.append("prepass", prepass.value ? "true" : "false");
-  form.append("layout", layout.value);
   form.append("model", model.value);
   try {
     const job = await api("/api/scans", { method: "POST", form });
@@ -84,21 +82,6 @@ async function submit() {
       <label class="field">Scan name <small>optional, becomes the default deck name</small>
         <input id="scan-name" v-model="name" type="text" placeholder="e.g. Mono-Red Aggro" maxlength="200" />
       </label>
-      <fieldset class="layout">
-        <legend>How are the cards laid out?</legend>
-        <label class="check">
-          <input id="layout-piles" v-model="layout" type="radio" value="piles" />
-          <span>In piles of the same card
-            <small>Copies stacked or fanned so only the front card's name shows. The model names the front card and counts the cards behind it.</small>
-          </span>
-        </label>
-        <label class="check">
-          <input id="layout-spread" v-model="layout" type="radio" value="spread" />
-          <span>Spread out
-            <small>Every card's name is visible.</small>
-          </span>
-        </label>
-      </fieldset>
       <label class="check">
         <input id="scan-prepass" v-model="prepass" type="checkbox" />
         <span>Find individual cards first (pre-pass)
@@ -114,7 +97,7 @@ async function submit() {
     <details class="panel tips">
       <summary><strong>Tips for better results</strong></summary>
       <ul>
-        <li>Piles are fine: keep the front card's name fully visible and fan the cards behind slightly so each edge shows.</li>
+        <li>Single cards and piles can be mixed. For piles, keep the front card's name fully visible and fan the cards behind so each one shows.</li>
         <li>Lay cards on a plain, contrasting surface with a little space between piles.</li>
         <li>Shoot from straight above in even light; avoid glare on foils and sleeves.</li>
         <li>Make sure every title line is readable. 9 to 20 cards per photo works well.</li>
@@ -135,6 +118,5 @@ async function submit() {
 .thumbs img { aspect-ratio: 4 / 3; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); width: 100%; }
 .tips ul { margin: 8px 0 0; padding-left: 1.2em; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
 .tips summary { cursor: pointer; }
-.layout { border: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
-.layout legend { font-weight: 500; font-size: 0.9rem; margin-bottom: 6px; }
+
 </style>
