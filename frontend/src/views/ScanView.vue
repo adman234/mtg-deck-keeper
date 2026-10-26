@@ -105,16 +105,37 @@ function choose(l, c) {
 }
 const checkQty = (l) => !l.accepted && l.flags.some((f) => QTY_FLAGS.includes(f));
 const pillFlags = (l) => l.flags.filter((f) => !QTY_FLAGS.includes(f));
-const confClass = (l) => (!l.card ? "bad" : l.confidence >= scan.value.threshold ? "ok" : "warn");
+const confClass = (l) => unsure(l) ? "warn" : confClassRaw(l);
+const confClassRaw = (l) => (!l.card ? "bad" : l.confidence >= scan.value.threshold ? "ok" : "warn");
+const located = ref(null);
+const raw = ref(null);
+async function toggleRaw() {
+  if (raw.value) return (raw.value = null);
+  await act(async () => { raw.value = await api(`/api/scans/${props.id}/debug`); });
+}
+function photosOf(l) {
+  const out = [];
+  scan.value.images.forEach((img, i) => {
+    const here = l.sources.filter((s) => s.image_id === img.id);
+    if (here.length) out.push({ id: img.id, n: i + 1, boxes: here.filter((s) => s.bbox) });
+  });
+  return out;
+}
+function showInPhoto(l, imageId) {
+  const i = scan.value.images.findIndex((img) => img.id === imageId);
+  const img = scan.value.images[i];
+  const boxes = l.sources.filter((s) => s.image_id === imageId && s.bbox)
+    .map((s) => ({ bbox: s.bbox, label: `${s.raw_name} ×${s.qty}` }));
+  located.value = { url: img.url, n: i + 1, width: img.width, height: img.height, boxes, title: l.card?.name || l.raw_name };
+}
+const boxStyle = (b, img) => ({
+  left: (b.bbox[0] / img.width) * 100 + "%", top: (b.bbox[1] / img.height) * 100 + "%",
+  width: (b.bbox[2] / img.width) * 100 + "%", height: (b.bbox[3] / img.height) * 100 + "%",
+});
 const failedPhotos = computed(() => (scan.value?.images || [])
   .map((img, i) => ({ n: i + 1, error: img.photo_error }))
   .filter((p) => p.error));
 const crops = (l) => l.sources.filter((s) => s.crop_url);
-const sourceText = (l) => {
-  const photos = new Set(l.sources.map((s) => s.image_id));
-  const idx = scan.value.images.map((i) => i.id);
-  return [...photos].map((p) => idx.indexOf(p) + 1).sort((a, b) => a - b).map((n) => `photo ${n}`).join(", ");
-};
 </script>
 
 <template>
@@ -140,6 +161,7 @@ const sourceText = (l) => {
             <p class="sub" style="font-size:0.8rem">Replaces the current review list.</p>
           </div>
         </details>
+        <button class="btn small" @click="toggleRaw">{{ raw ? "Hide raw data" : "Raw data" }}</button>
         <button v-if="!confirmDelete" class="btn small danger" @click="confirmDelete = true">Delete</button>
         <span v-else class="row"><span class="sub">Delete scan and photos?</span>
           <button class="btn small danger" @click="del">Delete</button><button class="btn small" @click="confirmDelete = false">Keep</button></span>
@@ -199,7 +221,7 @@ const sourceText = (l) => {
               <input type="number" min="1" max="999" :value="l.qty" @change="setQty(l, $event.target.value)" :aria-label="`Quantity of ${l.card?.name || l.raw_name}`" />
               <button class="btn small" @click="setQty(l, l.qty + 1)" aria-label="One more">+</button>
             </div>
-            <span v-if="checkQty(l)" class="qty-note">Check the quantity</span>
+            <span v-if="checkQty(l)" class="qty-note">{{ l.flags.includes("over_limit") && !l.accepted ? "Over 4: check it" : "Check the quantity" }}</span>
           </div>
 
           <div class="name">
@@ -213,7 +235,13 @@ const sourceText = (l) => {
                 <span v-if="unsure(l)">No card matches this well · </span>
                 <span v-else-if="!l.card">No matching card · </span>
                 <span v-else-if="l.raw_name.toLowerCase() !== l.card.name.toLowerCase()">Read as “{{ l.raw_name }}” · </span>
-                <span v-if="l.sources.length">{{ sourceText(l) }}</span>
+                <template v-if="l.sources.length">
+                  <template v-for="(p, i) in photosOf(l)" :key="p.id">
+                    <span v-if="i">, </span>
+                    <button v-if="p.boxes.length" class="link" @click="showInPhoto(l, p.id)" title="Show where this was read">photo {{ p.n }}</button>
+                    <span v-else>photo {{ p.n }}</span>
+                  </template>
+                </template>
                 <span v-else>Added by you</span>
               </p>
               <p v-if="l.card && !unsure(l) && how(l)" class="sub small how">{{ how(l) }}</p>
@@ -269,6 +297,43 @@ const sourceText = (l) => {
         <p v-else-if="flagged" class="sub">{{ flagged }} flagged line{{ flagged === 1 ? " is" : "s are" }} still unchecked. You can save anyway and edit the deck later.</p>
       </form>
 
+      <section v-if="raw" class="panel raw">
+        <div class="row" style="justify-content:space-between">
+          <h2>Raw data</h2>
+          <a class="btn small" :href="`/api/scans/${scan.id}/debug?download=true`" download>Download JSON</a>
+        </div>
+        <p class="sub">Exactly what the model replied for each photo, and how each line was decided. Useful for bug reports.</p>
+        <div v-for="(img, i) in raw.images" :key="img.id" class="raw-photo">
+          <h3>Photo {{ i + 1 }} <span class="sub">{{ img.filename }}</span></h3>
+          <p class="sub small">
+            Sent to the model at {{ (img.sent_size || []).join(" × ") || "?" }} px ·
+            boxes: {{ img.box_scale || "none given" }} ·
+            {{ img.duplicates?.length || 0 }} duplicate entr{{ img.duplicates?.length === 1 ? "y" : "ies" }} dropped
+            <span v-if="img.error" class="warn-text"> · failed: {{ img.error }}</span>
+          </p>
+          <details>
+            <summary>Whole-photo reply</summary>
+            <pre>{{ img.reply || "(none)" }}</pre>
+          </details>
+          <div class="table-wrap">
+            <table class="list">
+              <thead><tr><th>Read</th><th>Qty</th><th>Whole photo</th><th>Close-up</th><th>Card</th><th>Match</th><th>How</th></tr></thead>
+              <tbody>
+                <tr v-for="d in img.detections" :key="d.id">
+                  <td>{{ d.read_as }} <span class="sub small">({{ d.source }})</span></td>
+                  <td class="num">{{ d.qty }}</td>
+                  <td class="small">{{ d.raw?.photo ? `${d.raw.photo.name} ×${d.raw.photo.count}` : "—" }}</td>
+                  <td class="small">{{ d.raw?.zoom ? `${d.raw.zoom.name || "(no title)"} ×${d.raw.zoom.count ?? "?"}` : "—" }}<span v-if="d.raw?.used" class="sub"> · used {{ d.raw.used }}</span></td>
+                  <td>{{ d.card || "—" }}</td>
+                  <td class="num">{{ Math.round(d.match_score) }}%</td>
+                  <td class="small">{{ d.match_method || "—" }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <section class="page" style="gap:10px">
         <h2>Photos</h2>
         <div class="photos">
@@ -288,6 +353,17 @@ const sourceText = (l) => {
 
     <div v-if="zoom" class="zoom" @click="zoom = null" @keydown.esc="zoom = null" tabindex="-1">
       <img :src="zoom" alt="Enlarged image" />
+    </div>
+    <div v-if="located" class="zoom" @click="located = null" @keydown.esc="located = null" tabindex="-1">
+      <figure class="located" @click.stop>
+        <div class="frame">
+          <img :src="located.url" :alt="`Photo ${located.n}`" />
+          <div v-for="(b, i) in located.boxes" :key="i" class="box" :style="boxStyle(b, located)">
+            <span>{{ b.label }}</span>
+          </div>
+        </div>
+        <figcaption>Photo {{ located.n }} · where “{{ located.title }}” was read. <button class="link" @click="located = null">Close</button></figcaption>
+      </figure>
     </div>
   </div>
   <div v-else-if="error" class="alert">{{ error }}</div>
@@ -329,6 +405,16 @@ const sourceText = (l) => {
 .photo img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; }
 .zoom { position: fixed; inset: 0; z-index: 50; background: rgb(0 0 0 / 0.8); display: flex; align-items: center; justify-content: center; padding: 20px; cursor: zoom-out; }
 .zoom img { max-height: 100%; max-width: 100%; border-radius: 8px; }
+.located { margin: 0; display: flex; flex-direction: column; gap: 8px; align-items: center; max-height: 100%; cursor: default; }
+.located .frame { position: relative; display: inline-block; max-width: 100%; }
+.located .frame img { display: block; max-width: 100%; max-height: calc(100vh - 90px); border-radius: 8px; }
+.located figcaption { color: #fff; font-size: 0.9rem; }
+.located .link { color: #c9c3ff; }
+.box { position: absolute; border: 3px solid #ffd23f; border-radius: 6px; box-shadow: 0 0 0 9999px rgb(0 0 0 / 0.35); pointer-events: none; }
+.box span { position: absolute; left: -3px; top: -26px; background: #ffd23f; color: #1c1b2e; font-size: 0.78rem; font-weight: 700; padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
+.raw pre { white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 0.8rem; background: var(--bg); padding: 10px; border-radius: 6px; max-height: 320px; overflow: auto; margin: 6px 0 0; }
+.raw-photo { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line); }
+.raw summary { cursor: pointer; font-size: 0.9rem; }
 @media (max-width: 760px) {
   .line { grid-template-columns: 52px minmax(0, 1fr) auto; grid-template-areas: "t n c" "t q b" "a a a"; }
   .thumb { grid-area: t; } .name { grid-area: n; } .conf { grid-area: c; } .qty { grid-area: q; } select { grid-area: b; } .actions { grid-area: a; justify-content: flex-start; }

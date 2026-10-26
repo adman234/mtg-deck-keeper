@@ -62,6 +62,7 @@ Settings come from three places, highest priority first:
 | `MATCH_COLLECTOR_NUMBER` | `true` | Identify cards by set code + collector number |
 | `MATCH_FOREIGN_NAMES` | `true` | Search Scryfall for foreign-language and alternate names |
 | `MATCH_REASK` | `true` | Re-ask the model with candidates for unclear cut-out cards |
+| `PILE_ZOOM` | `true` | Re-read each pile from a close-up (count and name) |
 | `VISION_IMAGE_MAX_SIDE` | `1600` | Whole photos are shrunk to this before sending |
 | `CARD_DETECTION_DEFAULT` | `true` | Pre-pass checkbox default |
 | `ALLOW_PASSWORD_LOGIN` | `true` | Username/password login |

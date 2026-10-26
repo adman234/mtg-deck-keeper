@@ -79,7 +79,7 @@ export function methodText(method) {
 }
 
 // Flags about the number of copies are shown on the quantity box, not as a pill.
-export const QTY_FLAGS = ["count_mismatch", "check_basic_count"];
+export const QTY_FLAGS = ["count_mismatch", "check_basic_count", "over_limit"];
 
 export function pct(x) {
   return Math.round((x || 0) * 100) + "%";

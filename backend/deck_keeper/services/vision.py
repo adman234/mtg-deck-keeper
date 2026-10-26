@@ -26,6 +26,7 @@ CARD_SCHEMA = {
                     "set": {"type": "string"},
                     "collector_number": {"type": "string"},
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "box": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
                 },
                 "required": ["name", "count", "confidence"],
             },
@@ -41,12 +42,20 @@ SYSTEM_PROMPT = (
     "probability (0-1) that the name is correct. Reply with JSON only."
 )
 
+BOX_HINT = (
+    '"box" is where it is in the photo: [x1, y1, x2, y2] as numbers from 0 to 1000 across the '
+    "image width and height (top-left to bottom-right)."
+)
+FOUR_HINT = (
+    "Most piles hold 1 to 4 cards and 4 is by far the most common; if you can't tell 4 from 5, answer 4."
+)
+
 # Kept short on purpose: small models list fewer cards when a whole-table prompt asks for more detail.
 PHOTO_PROMPT = (
     "List every distinct card visible in this photo. For each one, count how many copies of that "
     "card are visible (count each physical card once). Include cards that are partly covered if the "
-    'title is readable. List each card name only once. Format: {"cards": [{"name": ..., "count": ..., '
-    '"confidence": ...}]}'
+    "title is readable. List each card name only once. " + BOX_HINT + ' Format: {"cards": [{"name": ..., '
+    '"count": ..., "confidence": ..., "box": [x1, y1, x2, y2]}]}'
 )
 
 PILES_PROMPT = (
@@ -54,12 +63,28 @@ PILES_PROMPT = (
     "only the FRONT card's title is fully visible and just the edges of the cards behind it show. The "
     "cards behind can be other printings or languages of the same card. For each pile, give the name "
     "of the front card only, and count = the number of cards in the pile including the front one "
-    "(count the stacked edges). Never read or guess names from the slivers of the cards behind. "
-    "A card on its own is a pile of 1. If two piles show the same card, list both. "
-    'Format: {"cards": [{"name": ..., "count": ..., "confidence": ...}]}'
+    "(count the stacked edges). " + FOUR_HINT + " Never read or guess names from the slivers of the "
+    "cards behind. A card on its own is a pile of 1. List every pile exactly once, even if two piles "
+    "show the same card. " + BOX_HINT + ' Format: {"cards": [{"name": ..., "count": ..., '
+    '"confidence": ..., "box": [x1, y1, x2, y2]}]}'
 )
 
 LAYOUTS = {"piles": PILES_PROMPT, "spread": PHOTO_PROMPT}
+
+ZOOM_PROMPT = (
+    "This is a close-up of one spot on a table of Magic cards: a single card or a pile of copies of "
+    "one card, overlapped so the front card is on top. {hint}Read the title of the FRONT card (English "
+    "name if you recognise it, otherwise as printed) and count every physical card in the pile by "
+    "counting the stacked card edges, including the front card. " + FOUR_HINT + " Ignore cards that "
+    "are only cut off at the edges of this close-up. If no card title is visible, return an empty name. "
+    'Format: {"name": ..., "count": ..., "confidence": ...}'
+)
+ZOOM_SCHEMA = {
+    "type": "object",
+    "properties": {"name": {"type": "string"}, "count": {"type": "integer", "minimum": 0},
+                   "confidence": {"type": "number", "minimum": 0, "maximum": 1}},
+    "required": ["name", "count", "confidence"],
+}
 
 CROP_PROMPT = (
     "This image is a single Magic card. Return exactly one entry with count 1. If you can't see a "
@@ -129,7 +154,19 @@ def _salvage(text: str) -> list:
     return items
 
 
-def parse_cards(text: str, add_repeats: bool = False) -> list[ReadCard]:
+def _box(value) -> list[float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    try:
+        x1, y1, x2, y2 = (float(v) for v in value)
+    except (TypeError, ValueError):
+        return None
+    if x2 <= x1 or y2 <= y1 or min(x1, y1) < 0:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def parse_cards(text: str, keep_repeats: bool = False) -> list[ReadCard]:
     """Parse the model's reply, tolerating code fences, chatter and replies that were cut off."""
     text = text.strip()
     fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
@@ -166,10 +203,10 @@ def parse_cards(text: str, add_repeats: bool = False) -> list[ReadCard]:
         if conf > 1:  # some models answer in percent
             conf = conf / 100
         key = name.casefold()
-        if key in seen:
-            # In piles, two piles of one card are listed separately and add up. Otherwise a repeat
-            # is the same card: small models sometimes repeat entries until they run out of tokens.
-            seen[key].count = seen[key].count + count if add_repeats else max(seen[key].count, count)
+        if key in seen and not keep_repeats:
+            # A repeat is the same card: small models sometimes repeat entries until they run out
+            # of tokens. (In piles each entry is a separate pile, kept apart and added up later.)
+            seen[key].count = max(seen[key].count, count)
             continue
         card = ReadCard(
             name=name,
@@ -177,6 +214,7 @@ def parse_cards(text: str, add_repeats: bool = False) -> list[ReadCard]:
             set=(str(item["set"]).strip() or None) if item.get("set") else None,
             collector_number=(str(item["collector_number"]).strip() or None) if item.get("collector_number") else None,
             confidence=min(1.0, max(0.0, conf)),
+            extra={"raw": item, "box": _box(item.get("box"))},
         )
         seen[key] = card
         out.append(card)
@@ -198,6 +236,12 @@ def _message_text(message: dict) -> tuple[str, str]:
 
 
 async def read_cards(cfg: VisionConfig, jpeg: bytes, single_card: bool, layout: str = "piles") -> list[ReadCard]:
+    return (await read_cards_raw(cfg, jpeg, single_card, layout))[0]
+
+
+async def read_cards_raw(cfg: VisionConfig, jpeg: bytes, single_card: bool,
+                         layout: str = "piles") -> tuple[list[ReadCard], str]:
+    """Like read_cards, but also returns the model's reply text for the scan's raw-data view."""
     if not cfg.model:
         raise VisionError("No vision model is configured. Choose one in Settings → Vision model.")
     image_url = "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()
@@ -239,13 +283,16 @@ async def read_cards(cfg: VisionConfig, jpeg: bytes, single_card: bool, layout: 
         content, reasoning = _message_text(choice["message"])
     except (KeyError, IndexError, TypeError, ValueError) as e:
         raise VisionError(f"Unexpected reply from vision server: {r.text[:300]}") from e
-    add_repeats = not single_card and layout == "piles"
+    keep_repeats = not single_card and layout == "piles"
     if content.strip():
-        return parse_cards(content, add_repeats)
+        try:
+            return parse_cards(content, keep_repeats), content
+        except VisionError as e:
+            raise VisionError(f"{e}. Reply: {content[:300]!r}") from e
     if reasoning.strip():
         # Thinking models sometimes put the whole answer in the reasoning text.
         try:
-            return parse_cards(reasoning, add_repeats)
+            return parse_cards(reasoning, keep_repeats), reasoning
         except VisionError:
             pass
     log.warning("Empty reply from %s (finish_reason=%s): %s", cfg.model, choice.get("finish_reason"), r.text[:500])
@@ -323,3 +370,63 @@ async def choose_card(cfg: VisionConfig, jpeg: bytes, candidates: list[str]) -> 
             return match, min(1.0, max(0.0, conf / 100 if conf > 1 else conf))
         return None
     return None
+
+
+@dataclass
+class ZoomRead:
+    name: str
+    count: int | None
+    confidence: float
+    raw: str
+
+
+async def read_pile(cfg: VisionConfig, jpeg: bytes, hint: str | None = None) -> ZoomRead | None:
+    """Re-read one pile from a close-up: front card's name and how many cards are in it."""
+    hint_text = f'The whole-table read thought this was "{hint}"; check it. ' if hint else ""
+    body = {
+        "model": cfg.model,
+        "temperature": 0,
+        "max_tokens": 512,
+        "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": [
+            {"type": "text", "text": ZOOM_PROMPT.replace("{hint}", hint_text)},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()}},
+        ]}],
+        "response_format": {"type": "json_schema", "json_schema": {"name": "pile", "schema": ZOOM_SCHEMA}},
+    }
+    if cfg.disable_thinking:
+        body["chat_template_kwargs"] = {"enable_thinking": False}
+    try:
+        async with _client(cfg) as client:
+            r = await client.post("/chat/completions", json=body)
+            while r.status_code in (400, 422):
+                field = next((f for f in OPTIONAL_FIELDS if f in body and f in r.text), None)
+                if field is None:
+                    break
+                body.pop(field)
+                r = await client.post("/chat/completions", json=body)
+            r.raise_for_status()
+        content, reasoning = _message_text(r.json()["choices"][0]["message"])
+    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as e:
+        log.info("Pile close-up read failed: %s", e)
+        return None
+    text = content if content.strip() else reasoning
+    start = text.find("{")
+    if start < 0:
+        return None
+    try:
+        data, _ = json.JSONDecoder().raw_decode(text[start:])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    name = re.sub(r"\s+", " ", str(data.get("name") or "").replace("_", " ")).strip()
+    try:
+        count = int(data["count"]) if data.get("count") not in (None, "") else None
+    except (TypeError, ValueError):
+        count = None
+    try:
+        conf = float(data.get("confidence", 0.5))
+    except (TypeError, ValueError):
+        conf = 0.5
+    conf = conf / 100 if conf > 1 else conf
+    return ZoomRead(name, count if count and count > 0 else None, min(1.0, max(0.0, conf)), text)

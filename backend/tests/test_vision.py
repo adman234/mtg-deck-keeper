@@ -116,10 +116,11 @@ def test_underscores_in_names_become_spaces():
     assert parse_cards('{"cards":[{"name":"Wirewood_Symbiote","count":3,"confidence":0.9}]}')[0].name == "Wirewood Symbiote"
 
 
-def test_piles_add_up_but_repeats_otherwise_do_not():
-    reply = '{"cards":[{"name":"Forest","count":4,"confidence":1},{"name":"Forest","count":3,"confidence":1}]}'
-    assert parse_cards(reply, add_repeats=True)[0].count == 7
-    assert parse_cards(reply)[0].count == 4
+def test_piles_stay_separate_but_repeats_otherwise_do_not_add_up():
+    reply = '{"cards":[{"name":"Forest","count":4,"confidence":1,"box":[0,0,100,100]},{"name":"Forest","count":3,"confidence":1}]}'
+    piles = parse_cards(reply, keep_repeats=True)
+    assert [c.count for c in piles] == [4, 3] and piles[0].extra["box"] == [0, 0, 100, 100]
+    assert [c.count for c in parse_cards(reply)] == [4]
 
 
 def test_layout_picks_the_whole_photo_prompt():
