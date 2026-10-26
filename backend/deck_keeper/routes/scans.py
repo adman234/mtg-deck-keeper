@@ -15,7 +15,7 @@ from ..config import get_env
 from ..db import get_db
 from ..deps import current_user
 from ..models import Card, Deck, DeckCard, Detection, ScanImage, ScanJob, ScanLine, User
-from ..services import decklists, matching, scanner, scryfall
+from ..services import decklists, matching, progress, scanner, scryfall
 from .cards import card_out
 
 router = APIRouter(prefix="/api/scans", tags=["scans"])
@@ -44,6 +44,7 @@ def job_summary(job: ScanJob) -> dict:
         "total_images": job.total_images, "processed_images": job.processed_images,
         "created_at": job.created_at.isoformat(),
         "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+        "progress": progress.get(job.id) if job.status == "processing" else None,
     }
 
 

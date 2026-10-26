@@ -28,7 +28,7 @@ async function load() {
     error.value = e.message;
   }
   clearTimeout(timer);
-  if (scan.value && ["queued", "processing"].includes(scan.value.status)) timer = setTimeout(load, 2000);
+  if (scan.value && ["queued", "processing"].includes(scan.value.status)) timer = setTimeout(load, scan.value.status === "processing" ? 1000 : 2000);
 }
 watch(() => props.id, load, { immediate: true });
 onBeforeUnmount(() => clearTimeout(timer));
@@ -168,6 +168,16 @@ const totals = computed(() => {
   return t;
 });
 const progress = computed(() => (scan.value?.total_images ? scan.value.processed_images / scan.value.total_images : 0));
+const live = computed(() => scan.value?.progress || null);
+const headline = computed(() => {
+  if (scan.value.status === "queued") return "Waiting for the vision model…";
+  const p = live.value;
+  if (p?.photo) return `Reading photo ${p.photo} of ${p.photos}`;
+  if (p && p.photos) return "Finishing up";
+  return scan.value.step || "Reading photos…";
+});
+const secs = (x) => (x >= 60 ? `${Math.floor(x / 60)}m ${Math.round(x % 60)}s` : `${x.toFixed(x < 10 ? 1 : 0)}s`);
+const timingText = (list) => (list || []).map((t) => `${t.stage} ${secs(t.seconds)}${t.count ? ` (${t.count})` : ""}`).join(" · ");
 const how = (l) => [...new Set(l.sources.map((s) => methodText(s.match_method)).filter(Boolean))].join(" · ");
 // Below this name-match score the "match" is just the nearest spelling, often to a name the
 // model made up, so the line leads with what was read rather than a card name and picture.
@@ -250,8 +260,21 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
     <div v-if="error" class="alert">{{ error }}</div>
 
     <div v-if="['queued', 'processing'].includes(scan.status)" class="panel">
-      <h2>{{ scan.status === "queued" ? "Waiting for the vision model…" : scan.step || "Reading photos…" }}</h2>
+      <h2>{{ headline }}</h2>
       <div class="progress"><div :style="{ width: Math.max(4, progress * 100) + '%' }"></div></div>
+      <div v-if="live?.stage" class="stage-now" aria-live="polite">
+        <div class="row" style="justify-content:space-between">
+          <strong>{{ live.stage.name }}<span v-if="live.stage.total"> · <span class="num">{{ live.stage.done }} of {{ live.stage.total }}</span></span></strong>
+          <span class="sub small num">{{ secs(live.stage.seconds) }}</span>
+        </div>
+        <div v-if="live.stage.total" class="progress thin"><div :style="{ width: (live.stage.done / live.stage.total) * 100 + '%' }"></div></div>
+      </div>
+      <ol v-if="live?.finished?.length" class="stages sub small">
+        <li v-for="(f, i) in live.finished" :key="i">
+          <span>{{ f.photo ? `Photo ${f.photo} · ` : "" }}{{ f.name }}<span v-if="f.count" class="num"> ({{ f.count }})</span></span>
+          <span class="num">{{ secs(f.seconds) }}</span>
+        </li>
+      </ol>
       <p class="sub">The first photo can take a while if llama-swap has to load the model. You can leave this page; the scan keeps running.</p>
     </div>
 
@@ -448,6 +471,7 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
             Sent to the model at {{ (img.sent_size || []).join(" × ") || "?" }} px ·
             boxes: {{ img.box_scale || "none given" }} ·
             {{ img.duplicates?.length || 0 }} duplicate entr{{ img.duplicates?.length === 1 ? "y" : "ies" }} dropped
+            <span v-if="img.timings"><br />Time: {{ timingText(img.timings) }}</span>
             <span v-if="img.error" class="warn-text"> · failed: {{ img.error }}</span>
           </p>
           <DebugOverlay :url="scan.images[i]?.url" :width="img.size[0]" :height="img.size[1]"
@@ -574,6 +598,10 @@ const crops = (l) => l.sources.filter((s) => s.crop_url);
 .raw pre { white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 0.8rem; background: var(--bg); padding: 10px; border-radius: 6px; max-height: 320px; overflow: auto; margin: 6px 0 0; }
 .raw-photo { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line); }
 .raw summary { cursor: pointer; font-size: 0.9rem; }
+.stage-now { display: flex; flex-direction: column; gap: 6px; }
+.progress.thin { height: 6px; }
+.stages { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 2px; }
+.stages li { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px dashed var(--line); padding: 2px 0; }
 .test textarea { width: 100%; font-family: var(--mono); font-size: 0.85rem; }
 @media (max-width: 760px) {
   .line { grid-template-columns: 52px minmax(0, 1fr) auto; grid-template-areas: "t n c" "t q b" "a a a"; }

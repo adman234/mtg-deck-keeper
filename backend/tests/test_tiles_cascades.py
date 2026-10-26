@@ -124,3 +124,36 @@ def test_scan_with_many_cards_is_read_in_tiles(admin):
     lines = admin.get(f"/api/scans/{job_id}").json()["lines"]
     assert all(ln["raw_name"] == "Sol Ring" for ln in lines)
     assert sum(ln["qty"] for ln in lines) == len(raw["tiles"])  # one per tile: none of them overlap
+
+
+def test_progress_reports_stages_and_counts():
+    from deck_keeper.services import progress
+    p = progress.start(99, photos=2)
+    progress.photo(1)
+    progress.stage("Reading title strips", 3)
+    progress.tick()
+    progress.tick()
+    snap = progress.get(99)
+    assert snap["photo"] == 1 and snap["photos"] == 2
+    assert (snap["stage"]["name"], snap["stage"]["done"], snap["stage"]["total"]) == ("Reading title strips", 2, 3)
+    progress.stage("Close-ups of each card and pile", 1)
+    assert progress.get(99)["finished"][-1]["name"] == "Reading title strips"
+    progress.finish()
+    assert [t["stage"] for t in p.timings(1)] == ["Reading title strips", "Close-ups of each card and pile"]
+    progress.end(99)
+    assert progress.get(99) is None
+    progress.tick()  # outside a scan: nothing happens
+
+
+def test_scan_keeps_how_long_each_stage_took(admin):
+    from .test_scan_flow import _jpeg
+    vision.transport = httpx.MockTransport(lambda r: chat_reply([{"name": "Shock", "count": 1, "confidence": 0.9}]))
+    scryfall.transport = httpx.MockTransport(lambda r: httpx.Response(404, json={}))
+    admin.put("/api/admin/settings", json={"values": {"vision.model": "daily"}})
+    job_id = admin.post("/api/scans", data={"prepass": "false"},
+                        files=[("files", ("a.jpg", _jpeg(), "image/jpeg"))]).json()["id"]
+    asyncio.run(scanner.process_job(job_id))
+    timings = admin.get(f"/api/scans/{job_id}/debug").json()["images"][0]["timings"]
+    stages = [t["stage"] for t in timings]
+    assert stages[:2] == ["Finding card outlines", "Reading the whole photo"] and "Identifying cards" in stages
+    assert admin.get(f"/api/scans/{job_id}").json()["progress"] is None  # done

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from . import piles, vision
+from . import piles, progress, vision
 
 log = logging.getLogger(__name__)
 
@@ -107,6 +107,7 @@ async def read(img: np.ndarray, cfg: vision.VisionConfig, sem: asyncio.Semaphore
     extra["bbox"]) and a debug record per tile."""
     H, W = img.shape[:2]
     tiles = plan(W, H, cards)
+    progress.stage(f"Reading the photo again in {len(tiles)} tiles", len(tiles))
 
     async def one(t: Tile) -> tuple[Tile, list[vision.ReadCard], str | None, str | None]:
         crop = img[t.y:t.y + t.h, t.x:t.x + t.w]
@@ -120,7 +121,9 @@ async def read(img: np.ndarray, cfg: vision.VisionConfig, sem: asyncio.Semaphore
             async with sem:
                 entries, reply = await vision.read_cards_raw(cfg, buf.tobytes(), False, prompt=vision.TILE_PROMPT)
         except vision.VisionError as e:
+            progress.tick()
             return t, [], None, str(e)
+        progress.tick()
         piles.place_boxes(entries, (crop.shape[1], crop.shape[0]), (t.w, t.h))
         piles.drop_runaway(entries)
         for e in entries:

@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from .. import app_settings, build_id
 from ..db import session_scope
 from ..models import Card, Detection, ScanImage, ScanJob, ScanLine
-from . import cascades, decklists, detection, evidence, matching, piles, resolver, scryfall, tiles, vision
+from . import cascades, decklists, detection, evidence, matching, piles, progress, resolver, scryfall, tiles, vision
 
 log = logging.getLogger(__name__)
 
@@ -105,7 +105,9 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
     photo_cards, photo_error, debug = None, None, None
     cards: list[vision.ReadCard] = []
     crop_dir, stem = Path(img_row.path).parent / "crops", Path(img_row.path).stem
+    progress.stage("Finding card outlines")
     outlines = await asyncio.to_thread(detection.find_cards, img)  # cards OpenCV sees whole (no model)
+    progress.stage("Reading the whole photo")
     try:
         cards, reply = await ask_photo(_jpeg_for_model(img, max_side))
     except vision.VisionError as e:
@@ -132,6 +134,7 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
     #    replacing what the whole-photo read listed there.
     strips: list[vision.ReadCard] = []
     if zoom and outlines:
+        progress.stage("Looking for cascading columns")
         columns = await asyncio.to_thread(cascades.find, img, [f.corners for f in outlines])
         if columns:
             strips = await _read_strips(img, columns, crop_dir, stem, cfg, sem)
@@ -145,6 +148,7 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
     if not photo_error:
         if zoom and box_scale:
             # The model's boxes are rough; line them up with the cards OpenCV can find (no model calls).
+            progress.stage("Lining up boxes and counting pile edges")
             debug["snap"] = piles.snap_boxes(cards, [f.bbox for f in outlines], [f.corners for f in outlines])
             debug["snap"]["resized"] = piles.fit_sizes(cards, [f.bbox for f in outlines], (w, h))
             await asyncio.to_thread(piles.count_fans, img, cards)
@@ -163,6 +167,7 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
         reason = "whole-photo read failed" if photo_error else "no usable boxes from the model"
         debug = {**(debug or {}), "prepass": reason}
         found = outlines
+        progress.stage("Reading cut-out cards one by one", len(found))
         crop_dir = Path(img_row.path).parent / "crops"
         crop_dir.mkdir(exist_ok=True)
         tasks = []
@@ -176,6 +181,7 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
                 reads.extend(_Read("crop", crop_path, bbox, rc) for rc in await task)
             except vision.VisionError as e:
                 crop_errors.append(e)
+            progress.tick()
         if photo_error and (not tasks or len(crop_errors) == len(tasks)):
             raise vision.VisionError(photo_error)
     elif photo_error and not reads:
@@ -187,6 +193,7 @@ async def _read_strips(img: np.ndarray, columns: list[cascades.Column], crop_dir
                        cfg: vision.VisionConfig, sem: asyncio.Semaphore) -> list[vision.ReadCard]:
     """Cut out each title strip of each column and read it on its own."""
     crop_dir.mkdir(exist_ok=True)
+    progress.stage("Reading title strips", sum(len(col.strips) for col in columns))
 
     async def one(c: int, k: int, strip: cascades.Strip) -> vision.ReadCard:
         ok, buf = cv2.imencode(".jpg", cascades.cut(img, strip), [cv2.IMWRITE_JPEG_QUALITY, 92])
@@ -194,6 +201,7 @@ async def _read_strips(img: np.ndarray, columns: list[cascades.Column], crop_dir
         path.write_bytes(buf.tobytes())
         async with sem:
             read = await vision.read_title(cfg, buf.tobytes())
+        progress.tick()
         name = read.name if read and read.name else f"Unreadable title (column {c + 1}, card {k + 1})"
         return vision.ReadCard(name=name, count=1, confidence=read.confidence if read and read.name else 0.0,
                                extra={"bbox": strip.bbox, "crop_path": str(path),
@@ -412,8 +420,10 @@ async def process_job(job_id: int) -> None:
                         "Check the container's internet access, then use Settings → Card database."
                     ) from e
                 index = matching.get_index(db)
+            progress.start(job.id, len(job.images))
             for n, img in enumerate(job.images, start=1):
                 job.step = f"Reading photo {n} of {len(job.images)}"
+                progress.photo(n)
                 db.commit()
                 result = await _process_image(img, job.prepass, cfg, sem, vs["image_max_side"], job.layout,
                                               vs["pile_zoom"], matching.get_index(db))
@@ -423,7 +433,9 @@ async def process_job(job_id: int) -> None:
                 job.step = f"Identifying cards in photo {n} of {len(job.images)}"
                 db.commit()
                 photo_reads = [r.card for r in reads if r.source == "photo"]
+                progress.stage("Identifying cards", len(reads))
                 for r in reads:
+                    progress.tick()
                     card, raw = r.card, {"reply_entry": r.card.extra.get("raw")}
                     if r.source == "strip":
                         raw = {"strip": r.card.extra["strip"]}
@@ -479,6 +491,8 @@ async def process_job(job_id: int) -> None:
                         model_confidence=res.confidence if res.confidence is not None else card.confidence,
                         card_id=res.card_id, match_score=res.score, match_method=res.method, raw=raw,
                     ))
+                progress.finish()
+                img.debug = {**(img.debug or {}), "timings": progress.current().timings(n)}
                 if result.photo_error is None:
                     seen = {d.card_id for d in img.detections if d.source == "photo" and d.card_id}
                     for d in img.detections:
@@ -487,9 +501,12 @@ async def process_job(job_id: int) -> None:
                 job.processed_images = n
                 db.commit()
             job.step = "Checking card types"
+            progress.photo(0)
+            progress.stage("Checking card types")
             db.commit()
             await _check_types(db, job)
             job.step = "Building decklist"
+            progress.stage("Building the decklist")
             db.flush()
             lines = build_lines(db, job, vs["confidence_threshold"])
             for line in lines:
@@ -499,6 +516,7 @@ async def process_job(job_id: int) -> None:
                 record_score(db, job, lines)
             # Card pictures for the review screen (lines without a cut-out show these instead).
             job.step = "Fetching card images"
+            progress.stage("Fetching card images")
             db.commit()
             card_ids = {ln.card_id for ln in lines if ln.card_id}
             await scryfall.fetch_details(db, list(db.scalars(select(Card).where(Card.id.in_(card_ids)))))
@@ -508,6 +526,8 @@ async def process_job(job_id: int) -> None:
             log.exception("Scan %s failed", job_id)
             job.status = "failed"
             job.error = str(e) or e.__class__.__name__
+        finally:
+            progress.end(job.id)
         job.finished_at = datetime.now(UTC)
 
 

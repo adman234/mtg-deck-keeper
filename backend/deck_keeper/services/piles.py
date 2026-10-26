@@ -14,7 +14,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import fans, matching, vision
+from . import fans, matching, progress, vision
 
 log = logging.getLogger(__name__)
 
@@ -378,15 +378,20 @@ async def zoom_in(img: np.ndarray, cards: list[vision.ReadCard], crop_dir: Path,
 
     async def one(i: int, card: vision.ReadCard) -> None:
         result = await read(i, card, False, "")
+        progress.tick()
         if result is not None and not result.name:
             # No title in view: the box most likely starts below it. Try once with more room above.
+            progress.add(1)
             retry = await read(i, card, True, "-tall")
+            progress.tick()
             if retry is not None:
                 retry.retried = True
                 result = retry if retry.name else result
         card.extra["zoom"] = result
 
-    await asyncio.gather(*(one(i, c) for i, c in enumerate(cards) if c.extra.get("bbox")))
+    boxed = [(i, c) for i, c in enumerate(cards) if c.extra.get("bbox")]
+    progress.stage("Close-ups of each card and pile", len(boxed))
+    await asyncio.gather(*(one(i, c) for i, c in boxed))
 
 
 @dataclass
@@ -550,6 +555,7 @@ async def settle(img: np.ndarray, cards: list[vision.ReadCard], index: matching.
             return
         async with sem:
             picked = await vision.choose_card(cfg, buf.tobytes(), options)
+        progress.tick()
         card.extra["tiebreak"] = {"options": options, "name": picked[0] if picked else None,
                                   "confidence": picked[1] if picked else None}
 
@@ -557,4 +563,6 @@ async def settle(img: np.ndarray, cards: list[vision.ReadCard], index: matching.
     for card in cards:
         if card.extra.get("bbox") and isinstance(ask := _judge(index, card, cards), Ask):
             asks.append(one(card, ask.options))
+    if asks:
+        progress.stage("Settling disagreements between reads", len(asks))
     await asyncio.gather(*asks)
