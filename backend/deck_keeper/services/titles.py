@@ -127,6 +127,15 @@ def band_of_box(box: list[int], card_h: float | None) -> list[list[float]]:
     return [[x + w * 0.04, top], [x + w * 0.96, top], [x + w * 0.96, top + th], [x + w * 0.04, top + th]]
 
 
+def expand(quad, left: float = 0.05, right: float = 0.02, vertical: float = 0.3) -> list[list[float]]:
+    """A title bar's quad grown by fractions of its width (each end) and height (top and bottom):
+    room around the name for reading it."""
+    tl, tr, br, bl = (np.float32(p) for p in quad)
+    a, d = tr - tl, bl - tl
+    return [(tl - a * left - d * vertical).tolist(), (tr + a * right - d * vertical).tolist(),
+            (br + a * right + d * vertical).tolist(), (bl - a * left + d * vertical).tolist()]
+
+
 def cut(img: np.ndarray, quad, height: int = 72) -> np.ndarray:
     """The title bar straightened and scaled to a fixed height (what the model reads, and what
     the review screen shows next to the name)."""

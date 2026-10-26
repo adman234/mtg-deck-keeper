@@ -91,9 +91,10 @@ def test_separate_cards_are_not_a_column():
     assert len(found) == 5 and cascades.find(img, [f.corners for f in found]) == []
 
 
-def test_scan_reads_each_title_in_a_column(admin):
+def test_scan_reads_each_title_in_a_column(admin, monkeypatch):
     """A column of 7 cards: the whole-photo read is hopeless, so each title strip is read on its
     own and replaces what the whole-photo read listed there."""
+    monkeypatch.setattr(scanner.titles, "in_strip", lambda img, corners: None)  # one read per strip
     img, n = column(7, tilt=True)
     jpeg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 95])[1].tobytes()
     titles = iter([f"Card {k}" for k in range(1, 20)])
@@ -264,3 +265,23 @@ def test_entry_next_to_a_strip_reading_the_same_name_is_one_card():
     assert scanner._read_by_strip(tile, [strip], 675)
     assert not scanner._read_by_strip(other, [strip], 675)
     assert not scanner._read_by_strip(_card("Siege-Gang Commander", [1388, 2600, 519, 203]), [strip], 675)
+
+
+def test_a_strip_is_read_from_its_title_bar_then_whole(tmp_path, monkeypatch):
+    """The levelled title bar is read first; when it gives no name, the whole strip is."""
+    img, _ = column(4)
+    cols = cascades.find(img, [f.corners for f in detection.find_cards(img)])
+    seen = []
+
+    def model(request):
+        content = json.loads(request.content)["messages"][-1]["content"]
+        seen.append(len(content[1]["image_url"]["url"]))
+        name = "" if len(seen) == 1 else "Lightning Bolt"
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"name": name, "confidence": 0.9})}}]})
+
+    vision.transport = httpx.MockTransport(model)
+    cols[0].strips = cols[0].strips[:1]
+    cfg = vision.VisionConfig(base_url="http://x/v1", api_key="", model="m", timeout=5)
+    out = asyncio.run(scanner._read_strips(img, cols, tmp_path, "p", cfg, asyncio.Semaphore(1)))
+    assert [c.name for c in out] == ["Lightning Bolt"] and len(seen) == 2
+    assert out[0].extra["strip"]["bar"] is not None  # the bar was found, and is the name box

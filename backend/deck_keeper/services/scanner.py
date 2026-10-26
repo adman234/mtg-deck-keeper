@@ -267,18 +267,27 @@ async def _read_strips(img: np.ndarray, columns: list[cascades.Column], crop_dir
     progress.stage("Reading title strips", sum(len(col.strips) for col in columns))
 
     async def one(c: int, k: int, strip: cascades.Strip) -> vision.ReadCard:
-        ok, buf = cv2.imencode(".jpg", cascades.cut(img, strip), [cv2.IMWRITE_JPEG_QUALITY, 92])
+        # The title bar found in the strip, levelled and cut out with a little room, holds the
+        # whole name and nothing else; the whole strip is the fallback (scan 19: a strip a little
+        # to one side read "Ring" for Sol Ring).
+        bar = await asyncio.to_thread(titles.in_strip, img, strip.corners)
         path = crop_dir / f"{stem}-col{c:02d}-{k:02d}.jpg"
-        path.write_bytes(buf.tobytes())
-        async with sem:
-            read = await vision.read_title(cfg, buf.tobytes())
+        read = None
+        cuts = ([titles.cut(img, titles.expand(bar[0]), BAR_READ_H)] if bar else []) + [cascades.cut(img, strip)]
+        for image in cuts:
+            ok, buf = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+            path.write_bytes(buf.tobytes())
+            async with sem:
+                read = await vision.read_title(cfg, buf.tobytes())
+            if read and read.name:
+                break
         progress.tick()
         name = read.name if read and read.name else ""
         return vision.ReadCard(name=name, count=1, confidence=read.confidence if read and read.name else 0.0,
                                extra={"bbox": strip.bbox, "crop_path": str(path),
                                       "strip": {"column": c + 1, "card": k + 1, "corners": strip.corners,
-                                                "title": strip.title, "edge_score": strip.score,
-                                                "reply": read.raw if read else None}})
+                                                "title": strip.title, "bar": bar[0] if bar else None,
+                                                "edge_score": strip.score, "reply": read.raw if read else None}})
 
     return list(await asyncio.gather(*(one(c, k, s) for c, col in enumerate(columns)
                                        for k, s in enumerate(col.strips))))
@@ -292,8 +301,8 @@ def _title_boxes(img: np.ndarray, cards: list[vision.ReadCard], card_h: float | 
     crop_dir.mkdir(exist_ok=True)
     for i, c in enumerate(cards):
         if c.extra.get("strip"):
-            found = titles.in_strip(img, c.extra["strip"]["corners"])
-            quad, exact = (found[0], True) if found else (c.extra["strip"].get("title"), False)
+            bar = c.extra["strip"].get("bar")
+            quad, exact = (bar, True) if bar else (c.extra["strip"].get("title"), False)
         elif c.extra.get("corners"):
             quad, _ = titles.for_outlined(img, c.extra["corners"])
             exact = True
@@ -375,6 +384,8 @@ def _unconfirmed(det: Detection, photo_card_ids: set[int]) -> bool:
 SURE_MATCH = 85.0  # below this the "match" is only the nearest spelling
 SAME_CARD_REACH = 0.5  # of a card's height: an entry and a strip this close, reading the same name, are one card
 ACCEPT_MATCH = 80.0  # below this it isn't taken at all ("Force of One" is not Forest)
+BAR_READ_H = 120  # px: a title bar is cut out this tall for the model to read
+SHORT_READ, SHORT_ACCEPT = 6, 90.0  # a read this short is a scrap of a name: it must match closer ("Ring" is not Spring)
 
 # Constructed decks allow at most 4 copies of a card, except basic lands and cards that
 # say otherwise. Counts above the limit are almost always a miscounted pile.
@@ -605,7 +616,8 @@ async def process_job(job_id: int) -> None:
                                 card, res = alt, alt_res
                                 raw["both_names"]["kept"] = other
                                 raw["used"] = "photo" if choice.used == "zoom" else "zoom"
-                    if res.method in ("name", "choice") and res.score < ACCEPT_MATCH:
+                    short = len(matching.normalize(card.name)) < SHORT_READ
+                    if res.method in ("name", "choice") and res.score < (SHORT_ACCEPT if short else ACCEPT_MATCH):
                         # Too far from any card name to guess: leave it for the user to pick.
                         res.card_id = None
                     if r.card.extra.get("title_quad"):

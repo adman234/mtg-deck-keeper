@@ -36,6 +36,7 @@ FRONT_WEIGHT = 4  # the outlined front card counts as this many strips in that l
 SIDE_ROWS = 0.12  # its sides are looked for in this much of the strip, from the top (title bar height)
 SLEEVE = (0.97, 1.12)  # a card's sides are this far apart, or its sleeve's
 SIDE_EDGES = 0.9  # the two sides together must be at least this strong (each strongest is 1)
+SPLIT = 1.6  # a strip this many times the column's usual height holds two cards
 SAME_REACH = 0.1  # walks up a column ending this close (of the longer) got about as far
 BORROWED = 3  # edges taken from other columns to try on a column whose front card looks different
 MATCH = 0.45
@@ -277,6 +278,22 @@ def _line_up(gray: np.ndarray, spans: list[tuple[int, int]], lefts: list[int], f
     return out
 
 
+def _split_tall(below: int, edges: list[tuple[int, int, float]]) -> list[tuple[int, int, float]]:
+    """A strip about twice the column's usual height holds two cards: the walk missed the edge
+    between them (scan 19: Cavern of Souls and Panharmonicon in one strip). Split it evenly; each
+    part's title bar is then found in it."""
+    spans = _spans(below, edges)
+    if len(spans) < 4:
+        return edges
+    usual = float(np.median([b - t for t, b in spans]))
+    out = []
+    for (t, b), edge in zip(spans, edges):
+        parts = round((b - t) / usual) if b - t > SPLIT * usual else 1
+        out += [(int(round(b - (b - t) * k / parts)), edge[1], 0.0) for k in range(1, parts)]
+        out.append(edge)
+    return out
+
+
 def _spans(below: int, edges: list[tuple[int, int, float]]) -> list[tuple[int, int]]:
     """(top, bottom) of each title strip, nearest the front card first."""
     out = []
@@ -324,6 +341,7 @@ def find(img: np.ndarray, found: list[list[list[float]]]) -> list[Column]:
         front = np.float32(found[i]).reshape(-1, 1, 2)
         col = Column(i)
         vgray = cv2.cvtColor(views[i][0], cv2.COLOR_BGR2GRAY)
+        edges = _split_tall(below, edges)
         lefts = _line_up(vgray, _spans(below, edges), [left for _, left, _ in edges], (below, views[i][2][0]))
         for (top, _, score), left in zip(edges, lefts):
             quad = np.float32([[[left, top]], [[left + CARD_W, top]], [[left + CARD_W, below]], [[left, below]]])
