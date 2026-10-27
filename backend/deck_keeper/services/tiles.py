@@ -154,6 +154,7 @@ async def read(img: np.ndarray, cfg: vision.VisionConfig, sem: asyncio.Semaphore
         piles.place_boxes(entries, (crop.shape[1], crop.shape[0]), (t.w, t.h))
         piles.drop_runaway(entries)
         for e in entries:
+            e.extra["tile"] = tiles.index(t)
             if e.extra.get("bbox"):
                 x, y, w, h = e.extra["bbox"]
                 e.extra["bbox"] = [x + t.x, y + t.y, w, h]

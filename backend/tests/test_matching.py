@@ -36,3 +36,10 @@ def test_the_first_words_of_one_card_name_match_it():
     assert idx.match("Siege-Gang")[0].score < 88  # two cards start so: can't tell which
     assert idx.match("Genesis")[0].name == "Genesis"  # a whole name wins
     assert all(m.score < 88 for m in idx.match("Pia"))  # too little of the name
+
+
+def test_a_legendary_card_found_by_its_title_after_the_comma():
+    idx = CardIndex([(1, "Azusa, Lost but Seeking"), (2, "Elspeth, Sun's Champion"),
+                     (3, "Gisela, the Broken Blade"), (4, "Bruna, the Fading Light")])
+    assert idx.match("Elspeth, Lost but Seeking")[0].name == "Azusa, Lost but Seeking"
+    assert idx.match("Elspeth, Sun's Champion")[0].name == "Elspeth, Sun's Champion"  # exact still wins

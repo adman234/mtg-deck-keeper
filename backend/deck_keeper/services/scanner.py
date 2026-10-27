@@ -13,6 +13,7 @@ import cv2
 import httpx
 import numpy as np
 from PIL import Image, ImageOps
+from rapidfuzz import fuzz
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -325,7 +326,7 @@ def _title_boxes(img: np.ndarray, cards: list[vision.ReadCard], card_h: float | 
 
 
 def _read_by_strip(card: vision.ReadCard, strips: list[vision.ReadCard], card_h: float | None) -> bool:
-    """Whether a title strip just above or below an entry read the same name: the same card, its
+    """Whether a title strip just above or below an entry read the same (or nearly the same) name: the same card, its
     box drawn a little off the strip (scan 19: the card right behind each front card was listed
     by both, the tile's box sitting over the front card's title)."""
     box = card.extra.get("bbox")
@@ -335,7 +336,7 @@ def _read_by_strip(card: vision.ReadCard, strips: list[vision.ReadCard], card_h:
     for s in strips:
         sb = s.extra["bbox"]
         overlap = min(box[0] + box[2], sb[0] + sb[2]) - max(box[0], sb[0])
-        if (matching.normalize(s.name) == key and overlap > 0.5 * min(box[2], sb[2])
+        if (fuzz.ratio(matching.normalize(s.name), key) >= SAME_READ and overlap > 0.5 * min(box[2], sb[2])
                 and abs((box[1] + box[3] / 2) - (sb[1] + sb[3] / 2)) < card_h * SAME_CARD_REACH):
             return True
     return False
@@ -380,6 +381,31 @@ WEAK_CROP_SCORE = 85.0
 WEAK_CROP_CONFIDENCE = 0.6
 
 
+def _tile_twins(db: Session, dets: list[Detection]) -> list[Detection]:
+    """Entries two tiles both listed: the same card, boxed about a card's step apart (each tile's
+    model placed its boxes a little differently, so the usual overlap test missed them; scan 16:
+    five cards counted twice). Basic lands are left alone: several lie next to each other. Of each
+    pair, the one whose close-up didn't confirm the name goes."""
+    tiled = [d for d in dets if d.source == "photo" and d.card_id and d.qty == 1 and d.bbox
+             and (d.raw or {}).get("tile") is not None]
+    names = dict(db.execute(select(Card.id, Card.name).where(Card.id.in_({d.card_id for d in tiled}))).all())
+    out: list[Detection] = []
+    for i, a in enumerate(tiled):
+        for b in tiled[i + 1:]:
+            if (a in out or b in out or a.card_id != b.card_id or a.raw["tile"] == b.raw["tile"]
+                    or names.get(a.card_id) in BASIC_LANDS):
+                continue
+            overlap = min(a.bbox[0] + a.bbox[2], b.bbox[0] + b.bbox[2]) - max(a.bbox[0], b.bbox[0])
+            reach = TWIN_REACH * max(a.bbox[3], b.bbox[3])
+            if overlap > 0.5 * min(a.bbox[2], b.bbox[2]) and abs(_cy(a.bbox) - _cy(b.bbox)) <= reach:
+                out.append(b if a.raw.get("used") == "zoom" or b.raw.get("used") != "zoom" else a)
+    return out
+
+
+def _cy(box: list[int]) -> float:
+    return box[1] + box[3] / 2
+
+
 def _unconfirmed(det: Detection, photo_card_ids: set[int]) -> bool:
     """A shaky crop read for a card the whole-photo read didn't see is usually a bad crop
     (e.g. only the artwork was cut out) rather than a real extra card."""
@@ -389,6 +415,8 @@ def _unconfirmed(det: Detection, photo_card_ids: set[int]) -> bool:
 
 
 SURE_MATCH = 85.0  # below this the "match" is only the nearest spelling
+SAME_READ = 75  # two reads this alike (ratio) are the same name, one of them misread ("Roseir" for Boseiju)
+TWIN_REACH = 1.6  # of a box's height: the same card listed by two tiles is boxed at most this far apart
 SAME_CARD_REACH = 0.5  # of a card's height: an entry and a strip this close, reading the same name, are one card
 ACCEPT_MATCH = 80.0  # below this it isn't taken at all ("Force of One" is not Forest)
 COLUMNS_COMPLETE = 0.85  # columns and outlined cards holding this much of a photo's share of the deck: no tiles
@@ -598,7 +626,7 @@ async def process_job(job_id: int) -> None:
                                "count_differs": choice.count_differs,
                                "unsure": choice.unsure, "zoom_region": r.card.extra.get("zoom_region"),
                                "model_box": r.card.extra.get("model_bbox"), "snapped": r.card.extra.get("snapped"),
-                               "resized": r.card.extra.get("resized"),
+                               "resized": r.card.extra.get("resized"), "tile": r.card.extra.get("tile"),
                                "shifted": r.card.extra.get("shifted"), "tiebreak": r.card.extra.get("tiebreak"),
                                "fan": (fan := r.card.extra.get("fan")) and {"count": fan.count, "direction": fan.direction,
                                                                             "edges": fan.edges},
@@ -648,6 +676,11 @@ async def process_job(job_id: int) -> None:
                         model_confidence=res.confidence if res.confidence is not None else card.confidence,
                         card_id=res.card_id, match_score=res.score, match_method=res.method, raw=raw,
                     ))
+                twins = _tile_twins(db, img.detections)
+                if twins:
+                    img.detections[:] = [d for d in img.detections if d not in twins]
+                    img.debug = {**(img.debug or {}), "duplicates": (img.debug or {}).get("duplicates", []) + [
+                        {"name": d.raw_name, "count": d.qty, "box": d.bbox, "why": "read by two tiles"} for d in twins]}
                 progress.finish()
                 img.debug = {**(img.debug or {}), "timings": progress.current().timings(n)}
                 if result.photo_error is None:

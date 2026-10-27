@@ -292,3 +292,23 @@ def test_a_strip_is_read_from_its_title_bar_then_whole(tmp_path, monkeypatch):
     assert [c.name for c in out] == ["Lightning Bolt"] and len(seen) == 2
     assert out[0].extra["strip"]["bar"] is not None  # the bar was found, and is the name box
 
+
+
+def test_a_card_two_tiles_both_listed_counts_once(client):
+    """Scan 16: two tiles listed Reap and Sow with boxes a card's step apart; the second close-up
+    read the card below. Basic lands next to each other are separate cards."""
+    from deck_keeper.db import session_scope
+    from deck_keeper.models import Card, Detection
+
+    with session_scope() as db:
+        bolt = db.query(Card).filter_by(name="Lightning Bolt").one().id
+        forest = db.query(Card).filter_by(name="Mountain").one().id
+
+        def det(card_id, box, tile, used):
+            return Detection(source="photo", bbox=box, raw_name="x", qty=1, card_id=card_id,
+                             match_score=100, raw={"tile": tile, "used": used})
+
+        a, b = det(bolt, [1121, 1514, 395, 80], 0, "zoom"), det(bolt, [1121, 1577, 395, 80], 1, "photo")
+        far = det(bolt, [1121, 1900, 395, 80], 1, "zoom")  # a second copy further down the column
+        f1, f2 = det(forest, [500, 1514, 395, 80], 0, "zoom"), det(forest, [500, 1577, 395, 80], 1, "zoom")
+        assert scanner._tile_twins(db, [a, b, far, f1, f2]) == [b]
