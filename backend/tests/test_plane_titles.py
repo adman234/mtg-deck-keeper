@@ -71,3 +71,20 @@ def test_a_strip_title_box_is_tight_and_level_on_a_turned_card():
     strip = [[x0 + 30, y0], [x0 + 280, y0], [x0 + 280, y0 + 60], [x0 + 30, y0 + 60]]
     quad, _ = titles.in_strip(img, strip)
     assert np.abs(np.float32(quad) - bar).max() < 6, (quad, bar.round())
+
+
+def test_every_title_bar_down_a_column_is_found():
+    """A column whose front card OpenCV didn't outline: looking down it finds each card's bar."""
+    sys.path.insert(0, str(Path(__file__).parent))
+    from cascade_photo import column
+
+    img, n = column(7, step=40, drift=0)
+    w, h, fx, fy = 250, 349, 480, 1500 - 349 - 120
+    region = [fx - 60, fy - 6 * 40 - 40, w + 120, 6 * 40 + 40 + 200]
+    bars = titles.bars_down(img, region, w, h)
+    tops = sorted(round(np.float32(q)[:, 1].min()) for q, _ in bars)
+    want = [fy - k * 40 + 20 for k in reversed(range(n))]  # each card's bar is 20 px below its top
+    assert all(any(abs(t - wy) <= 4 for t in tops) for wy in want), (tops, want)
+    for q, _ in bars:  # level and as wide as a bar
+        q = np.float32(q)
+        assert abs(q[0, 1] - q[1, 1]) < 2 and 0.75 * w <= q[1, 0] - q[0, 0] <= 0.97 * w

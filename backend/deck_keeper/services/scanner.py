@@ -206,6 +206,17 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
         debug.update(columns=[{"front": outlines[col.front].bbox, "strips": len(col.strips)} for col in columns],
                      replaced_by_strips=before - len(cards))
 
+    # Columns whose front card has no outline weren't followed, so the model listed their cards,
+    # boxed roughly (scan 16: a box over a whole stack, a name box on the next card's title). In a
+    # crowded photo, find each title bar down those columns and read it on its own, like a strip.
+    if zoom and card_w and card_h and (columns or debug.get("tiled")):
+        bar_reads, replaced = await _read_bar_columns(img, cards, outlines, strips, card_w, card_h,
+                                                      len(columns), crop_dir, stem, cfg, sem)
+        if bar_reads:
+            cards = [c for c in cards if c not in replaced]
+            strips += bar_reads
+            debug["bar_columns"] = {"read": len(bar_reads), "replaced": len(replaced)}
+
     if not photo_error:
         if zoom and box_scale:
             # The model's boxes are rough; line them up with the cards OpenCV can find (no model calls).
@@ -264,7 +275,7 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
         raise vision.VisionError(photo_error)
     if reads:
         progress.stage("Boxing each card's name")
-        await asyncio.to_thread(_title_boxes, img, [r.card for r in reads], card_h, crop_dir, stem)
+        await asyncio.to_thread(_title_boxes, img, [r.card for r in reads], card_h, crop_dir, stem, card_w)
     return _ImageResult(len(found), reads, photo_cards, photo_error, debug)
 
 
@@ -301,8 +312,114 @@ async def _read_strips(img: np.ndarray, columns: list[cascades.Column], crop_dir
                                        for k, s in enumerate(col.strips))))
 
 
+BASIC_KEYS = {matching.normalize(n) for n in BASIC_LANDS}
+TYPE_WORDS = {"artifact", "battle", "basic", "creature", "enchantment", "instant", "kindred", "land", "legendary",
+              "planeswalker", "snow", "sorcery", "tribal", "world"}
+
+
+def _type_line(name: str) -> bool:
+    """Whether a read is a type line ("Land Creature — Forest Dryad", "Sorcery"), not a name: a
+    card lying whole has a bar for its type line too."""
+    words = matching.normalize(name).split()
+    return bool(words) and words[0] in TYPE_WORDS and ("—" in name or " - " in name or set(words) <= TYPE_WORDS)
+
+
+def _bar_columns(cards: list[vision.ReadCard], outlines: list[detection.FoundCard], strips: list[vision.ReadCard],
+                 card_w: float) -> list[list[vision.ReadCard]]:
+    """The model's entries outside the followed columns and outlined cards, grouped into columns
+    by where they sit across; only groups of BAR_COLUMN or more (a lone entry is often a deck box
+    or something else on the table)."""
+    covered = [np.float32(c.extra["strip"]["corners"]) for c in strips]
+    groups: list[list[vision.ReadCard]] = []
+    centres: list[float] = []
+    loose = [c for c in cards if c.extra.get("bbox") and c.count == 1 and not _inside_any(c.extra["bbox"], covered)
+             and not any(_centre_in(c.extra["bbox"], f.bbox) for f in outlines)]
+    for c in sorted(loose, key=lambda c: c.extra["bbox"][0] + c.extra["bbox"][2] / 2):
+        cx = c.extra["bbox"][0] + c.extra["bbox"][2] / 2
+        k = next((i for i, g in enumerate(centres) if abs(g - cx) < 0.5 * card_w), None)
+        if k is None:
+            groups.append([c])
+            centres.append(cx)
+        else:
+            groups[k].append(c)
+            centres[k] = float(np.mean([e.extra["bbox"][0] + e.extra["bbox"][2] / 2 for e in groups[k]]))
+    return [g for g in groups if len(g) >= BAR_COLUMN]
+
+
+def _centre_in(box: list[int], outer: list[int]) -> bool:
+    cx, cy = box[0] + box[2] / 2, box[1] + box[3] / 2
+    return outer[0] <= cx <= outer[0] + outer[2] and outer[1] <= cy <= outer[1] + outer[3]
+
+
+async def _read_bar_columns(img: np.ndarray, cards: list[vision.ReadCard], outlines: list[detection.FoundCard],
+                            strips: list[vision.ReadCard], card_w: float, card_h: float, first: int,
+                            crop_dir: Path, stem: str, cfg: vision.VisionConfig, sem: asyncio.Semaphore
+                            ) -> tuple[list[vision.ReadCard], list[vision.ReadCard]]:
+    """Read every title bar down each column the model listed but OpenCV couldn't follow. Returns
+    the reads (like strips: source "strip", with the bar as the name box) and the model's entries
+    they read again (by name), which they replace. Bars with no name, a type line, or no card's name (checked when identifying) go."""
+    groups = _bar_columns(cards, outlines, strips, card_w)
+    if not groups:
+        return [], []
+    taken = [np.float32(c.extra["strip"]["corners"]) for c in strips]
+    jobs: list[tuple[int, int, list[list[float]]]] = []
+    for g, group in enumerate(groups):
+        boxes = [c.extra["bbox"] for c in group]
+        cx = float(np.mean([b[0] + b[2] / 2 for b in boxes]))
+        y0, y1 = min(b[1] for b in boxes), max(b[1] + b[3] for b in boxes)
+        # The model's boxes sit over a stack and can end above its front card: reach below them.
+        region = [int(cx - 0.6 * card_w), int(y0 - 0.15 * card_h), int(1.2 * card_w), int(y1 - y0 + 0.55 * card_h)]
+        bars = await asyncio.to_thread(titles.bars_down, img, region, card_w, card_h)
+        for k, (quad, _) in enumerate(bars):
+            centre = np.float32(quad).mean(0)
+            if _inside_any([int(centre[0]), int(centre[1]), 0, 0], taken):
+                continue
+            if any(_centre_in([int(centre[0]), int(centre[1]), 0, 0], f.bbox)
+                   and centre[1] > f.bbox[1] + 0.15 * card_h for f in outlines):
+                continue  # inside an outlined card, below its own title
+            jobs.append((first + g, k, quad))
+    progress.stage("Reading title bars in columns without an outlined front card", len(jobs))
+    crop_dir.mkdir(exist_ok=True)
+
+    async def one(col: int, k: int, quad: list[list[float]]) -> vision.ReadCard | None:
+        ok, buf = cv2.imencode(".jpg", titles.cut(img, titles.expand(quad), BAR_READ_H), [cv2.IMWRITE_JPEG_QUALITY, 92])
+        path = crop_dir / f"{stem}-bar{col:02d}-{k:02d}.jpg"
+        path.write_bytes(buf.tobytes())
+        async with sem:
+            read = await vision.read_title(cfg, buf.tobytes())
+        progress.tick()
+        if not read or not read.name or _type_line(read.name):
+            return None
+        pts = np.float32(quad)
+        x1, y1 = pts.min(0)
+        x2, y2 = pts.max(0)
+        return vision.ReadCard(name=read.name, count=1, confidence=read.confidence,
+                               extra={"bbox": [int(x1), int(y1), int(x2 - x1), int(y2 - y1)], "crop_path": str(path),
+                                      "strip": {"column": col + 1, "card": k + 1, "corners": titles.expand(quad),
+                                                "title": quad, "bar": quad, "found": "bars",
+                                                "reply": read.raw}})
+
+    reads = [r for r in await asyncio.gather(*(one(*j) for j in jobs)) if r]
+    # The front card's type line or rules box can be read as its name too: the same name again
+    # within a card's height down the same column is that card, not another copy.
+    kept: list[vision.ReadCard] = []
+    for r in sorted(reads, key=lambda r: (r.extra["strip"]["column"], r.extra["bbox"][1])):
+        key = matching.normalize(r.name)
+        if key not in BASIC_KEYS and any(
+                k.extra["strip"]["column"] == r.extra["strip"]["column"] and matching.normalize(k.name) == key
+                and r.extra["bbox"][1] - k.extra["bbox"][1] < card_h for k in kept):
+            continue
+        kept.append(r)
+    # A model entry the bars read too is replaced; one no bar read keeps its place (a title bar
+    # hidden or missed), so nothing the model saw is lost.
+    replaced = [c for g, group in enumerate(groups) for c in group
+                if any(r.extra["strip"]["column"] == first + g + 1
+                       and fuzz.ratio(matching.normalize(r.name), matching.normalize(c.name)) >= SAME_READ for r in kept)]
+    return kept, replaced
+
+
 def _title_boxes(img: np.ndarray, cards: list[vision.ReadCard], card_h: float | None, crop_dir: Path,
-                 stem: str) -> None:
+                 stem: str, card_w: float | None = None) -> None:
     """Give every card a box around its name (extra["title_quad"]) and a straightened cut-out of
     it (extra["title_crop"]): exact for cards OpenCV outlined and for title strips, where the
     title should be in the model's box otherwise (extra["title_exact"] False)."""
@@ -315,7 +432,14 @@ def _title_boxes(img: np.ndarray, cards: list[vision.ReadCard], card_h: float | 
             quad, _ = titles.for_outlined(img, c.extra["corners"])
             exact = True
         elif c.extra.get("bbox"):
-            quad, exact = titles.band_of_box(c.extra["bbox"], card_h), False
+            # The model's box: look for a real title bar where its top is, else guess the band.
+            x, y, bw, bh = c.extra["bbox"]
+            cw = min(bw, card_w) if card_w else bw
+            ch = card_h or cw * 88 / 63
+            window = [[x + bw / 2 - cw / 2, y - 0.05 * ch], [x + bw / 2 + cw / 2, y - 0.05 * ch],
+                      [x + bw / 2 + cw / 2, y + 0.17 * ch], [x + bw / 2 - cw / 2, y + 0.17 * ch]]
+            found = titles.in_strip(img, window)
+            quad, exact = (found[0], True) if found else (titles.band_of_box(c.extra["bbox"], card_h), False)
         else:
             continue
         if not quad:
@@ -419,6 +543,7 @@ SAME_READ = 75  # two reads this alike (ratio) are the same name, one of them mi
 TWIN_REACH = 1.6  # of a box's height: the same card listed by two tiles is boxed at most this far apart
 SAME_CARD_REACH = 0.5  # of a card's height: an entry and a strip this close, reading the same name, are one card
 ACCEPT_MATCH = 80.0  # below this it isn't taken at all ("Force of One" is not Forest)
+BAR_COLUMN = 3  # the model listing this many cards in a line outside the followed columns: a column to read bar by bar
 COLUMNS_COMPLETE = 0.85  # columns and outlined cards holding this much of a photo's share of the deck: no tiles
 BAR_READ_H = 120  # px: a title bar is cut out this tall for the model to read
 SHORT_READ, SHORT_ACCEPT = 6, 90.0  # a read this short is a scrap of a name: it must match closer ("Ring" is not Spring)
@@ -659,6 +784,12 @@ async def process_job(job_id: int) -> None:
                     if res.method in ("name", "choice") and res.score < (SHORT_ACCEPT if short else ACCEPT_MATCH):
                         # Too far from any card name to guess: leave it for the user to pick.
                         res.card_id = None
+                    if res.card_id is None and (r.card.extra.get("strip") or {}).get("found") == "bars":
+                        # A bar found looking down a column with no outlined front isn't always a
+                        # title (a line in the art, the rules box): with no card's name, it isn't one.
+                        img.debug = {**(img.debug or {}), "bars_not_cards":
+                                     (img.debug or {}).get("bars_not_cards", 0) + 1}
+                        continue
                     if r.card.extra.get("title_quad"):
                         raw["title"] = {"quad": r.card.extra["title_quad"], "crop": r.card.extra["title_crop"],
                                         "exact": r.card.extra["title_exact"]}

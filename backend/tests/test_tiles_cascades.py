@@ -312,3 +312,32 @@ def test_a_card_two_tiles_both_listed_counts_once(client):
         far = det(bolt, [1121, 1900, 395, 80], 1, "zoom")  # a second copy further down the column
         f1, f2 = det(forest, [500, 1514, 395, 80], 0, "zoom"), det(forest, [500, 1577, 395, 80], 1, "zoom")
         assert scanner._tile_twins(db, [a, b, far, f1, f2]) == [b]
+
+
+def test_type_lines_are_not_names():
+    assert scanner._type_line("Land Creature — Forest Dryad") and scanner._type_line("Sorcery")
+    assert scanner._type_line("Legendary Creature - Elf Druid")
+    assert not scanner._type_line("Artifact Mutation") and not scanner._type_line("Natural Order")
+
+
+def test_a_column_without_an_outlined_front_is_read_bar_by_bar(tmp_path, monkeypatch):
+    """Scan 16: the model listed a column's cards, boxed roughly, but OpenCV couldn't outline its
+    front card. Each title bar down the column is read on its own instead, and the model's
+    entries it read again are replaced; a type line read off the front card is not a card."""
+    img, n = column(7, step=40, drift=0)
+    names = iter(["Sorcery"] + [f"Card {k}" for k in range(1, 40)])
+    calls = []
+
+    async def read_title(cfg, jpeg):
+        calls.append(jpeg)
+        return vision.ZoomRead(next(names), 1, 0.9, "{}")
+
+    monkeypatch.setattr(vision, "read_title", read_title)
+    fy = 1500 - 349 - 120
+    entries = [vision.ReadCard(name=f"Card {k}", count=1, confidence=0.9,
+                               extra={"bbox": [470, fy - (n - k) * 40 - 30, 270, 60]}) for k in range(1, 4)]
+    reads, replaced = asyncio.run(scanner._read_bar_columns(img, entries, [], [], 250, 349, 0, tmp_path, "p", None,
+                                                            asyncio.Semaphore(1)))
+    assert len(calls) >= n and "Sorcery" not in [r.name for r in reads]
+    assert all(r.extra["strip"]["bar"] and r.extra["strip"]["found"] == "bars" for r in reads)
+    assert sorted(c.name for c in replaced) == sorted(c.name for c in entries if c.name in [r.name for r in reads])

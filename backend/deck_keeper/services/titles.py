@@ -272,3 +272,35 @@ def in_strip(img: np.ndarray, corners) -> tuple[list[list[float]], float] | None
     pts = (np.hstack([pts, np.ones((4, 1), np.float32)]) @ Ri.T).astype(np.float32)
     quad = cv2.perspectiveTransform(pts.reshape(-1, 1, 2), np.linalg.inv(M)).reshape(4, 2)
     return quad.round(1).tolist(), bar.score
+
+
+SCAN_WINDOW = 0.22  # of a card's height: each look for a title bar down a column covers this much
+SCAN_STEP = 0.035  # ...and the next look starts this much further down
+SAME_BAR = 0.06  # bars found this close (of a card's height) by overlapping looks are one bar
+
+
+def bars_down(img: np.ndarray, region: list[int], card_w: float, card_h: float) -> list[tuple[list[list[float]], float]]:
+    """Every title bar in a region of an upright photo holding one column of cards whose fronts
+    weren't outlined (so the column couldn't be followed from them): the column is looked down a
+    little at a time, each look levelled and searched like a title strip. Top first."""
+    x, y, w, h = region
+    left = x + w / 2 - card_w / 2
+    win, step = card_h * SCAN_WINDOW, card_h * SCAN_STEP
+    found: list[tuple[float, list[list[float]], float]] = []
+    top = float(y)
+    while top < y + h:
+        corners = [[left, top], [left + card_w, top], [left + card_w, top + win], [left, top + win]]
+        bar = in_strip(img, corners)
+        if bar:
+            quad, score = bar
+            cy = (quad[0][1] + quad[1][1] + quad[2][1] + quad[3][1]) / 4
+            if y <= cy <= y + h:
+                found.append((cy, quad, score))
+        top += step
+    # The same bar is found by several overlapping looks: keep the best of each.
+    found.sort(key=lambda f: -f[2])
+    kept: list[tuple[float, list[list[float]], float]] = []
+    for f in found:
+        if all(abs(f[0] - k[0]) > SAME_BAR * card_h for k in kept):
+            kept.append(f)
+    return [(q, s) for _, q, s in sorted(kept, key=lambda f: f[0])]
