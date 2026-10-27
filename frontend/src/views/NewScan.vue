@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { api, DECK_TYPES, session } from "../api";
 
@@ -40,6 +40,25 @@ function drop(e) {
   dragging.value = false;
   add(e.dataTransfer.files);
 }
+// How long it should take, from this server's recent scans: the photos picked and the deck type's cards.
+const estimate = ref(null);
+let asked = 0;
+watch([() => files.value.length, deckType], async ([photos, type]) => {
+  const mine = ++asked;
+  if (!photos) return (estimate.value = null);
+  try {
+    const r = await api(`/api/scans/estimate?photos=${photos}&deck_type=${encodeURIComponent(type)}`);
+    if (mine === asked) estimate.value = r;
+  } catch {
+    if (mine === asked) estimate.value = null;
+  }
+});
+const estimateText = computed(() => {
+  const s = estimate.value?.seconds;
+  if (!s) return "";
+  return s >= 90 ? `about ${Math.round(s / 60)} min` : s >= 45 ? "about 1 min" : "under a minute";
+});
+
 const totalMb = computed(() => (files.value.reduce((a, f) => a + f.file.size, 0) / 1048576).toFixed(1));
 const visionMissing = computed(() => settings.value && !settings.value["vision.model"].value);
 
@@ -93,6 +112,9 @@ async function submit() {
       <div class="row">
         <button class="btn primary" :disabled="!files.length || busy">{{ busy ? "Uploading…" : `Scan ${files.length || ""} photo${files.length === 1 ? "" : "s"}` }}</button>
         <span v-if="files.length" class="sub num">{{ totalMb }} MB</span>
+        <span v-if="estimateText" class="sub" :title="estimate.based_on ? `From your last ${estimate.based_on} scans` : 'A first guess: it learns from your scans'">
+          · should take {{ estimateText }}<span v-if="!estimate.based_on"> (a first guess until a few scans have run)</span>
+        </span>
       </div>
     </form>
 

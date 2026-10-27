@@ -15,7 +15,7 @@ from ..config import get_env
 from ..db import get_db
 from ..deps import current_user
 from ..models import Card, Deck, DeckCard, Detection, ScanImage, ScanJob, ScanLine, User
-from ..services import decklists, matching, progress, scanner, scryfall
+from ..services import decklists, estimate, matching, progress, scanner, scryfall
 from .cards import card_out
 
 router = APIRouter(prefix="/api/scans", tags=["scans"])
@@ -163,6 +163,13 @@ async def create_scan(
     db.commit()
     scanner.notify()
     return job_summary(job)
+
+
+@router.get("/estimate")
+def estimate_time(photos: int = 1, deck_type: str = "other", db: Session = Depends(get_db),
+                  user: User = Depends(current_user)):
+    """How long a new scan of this many photos should take (declared before /{job_id})."""
+    return estimate.seconds_for(db, max(1, photos), deck_type)
 
 
 @router.get("/{job_id}")

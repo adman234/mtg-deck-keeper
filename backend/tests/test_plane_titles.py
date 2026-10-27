@@ -88,3 +88,15 @@ def test_every_title_bar_down_a_column_is_found():
     for q, _ in bars:  # level and as wide as a bar
         q = np.float32(q)
         assert abs(q[0, 1] - q[1, 1]) < 2 and 0.75 * w <= q[1, 0] - q[0, 0] <= 0.97 * w
+
+
+def test_a_name_box_is_centred_on_its_text_and_boxes_without_text_are_known():
+    img = np.full((300, 600, 3), 60, np.uint8)
+    cv2.rectangle(img, (100, 100), (500, 160), (215, 225, 230), -1)  # a title bar
+    cv2.putText(img, "Llanowar Elves", (115, 142), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (30, 30, 30), 2, cv2.LINE_AA)
+    bar = [[100, 100], [500, 100], [500, 160], [100, 160]]
+    low = [[x, y + 24] for x, y in bar]  # found 40% of a bar too low: the name at its top edge
+    moved = np.float32(titles.centre_on_text(img, low))
+    assert abs(moved[0, 1] - 100) <= 6 and abs(moved[3, 1] - 160) <= 6
+    assert titles.holds_text(img, bar)
+    assert not titles.holds_text(img, [[100, 200], [500, 200], [500, 260], [100, 260]])  # plain sleeve

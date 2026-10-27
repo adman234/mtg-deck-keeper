@@ -204,7 +204,13 @@ const totals = computed(() => {
   lines.value.forEach((l) => (t[l.board] += l.qty));
   return t;
 });
-const progress = computed(() => (scan.value?.total_images ? scan.value.processed_images / scan.value.total_images : 0));
+// The overall bar moves with the time taken against the estimate (it corrects itself when a stage
+// runs slower), not just per finished photo, which for one photo never moved.
+const progress = computed(() => {
+  const f = scan.value?.progress?.fraction;
+  if (f != null) return f;
+  return scan.value?.total_images ? scan.value.processed_images / scan.value.total_images : 0;
+});
 const live = computed(() => scan.value?.progress || null);
 const headline = computed(() => {
   if (scan.value.status === "queued") return "Waiting for the vision model…";
@@ -214,6 +220,7 @@ const headline = computed(() => {
   return scan.value.step || "Reading photos…";
 });
 const secs = (x) => (x >= 60 ? `${Math.floor(x / 60)}m ${Math.round(x % 60)}s` : `${x.toFixed(x < 10 ? 1 : 0)}s`);
+const roughly = (x) => (x >= 90 ? `${Math.round(x / 60)} min` : x >= 45 ? "1 min" : `${Math.max(5, Math.round(x / 5) * 5)} s`);
 const timingText = (list) => (list || []).map((t) => `${t.stage} ${secs(t.seconds)}${t.count ? ` (${t.count})` : ""}`).join(" · ");
 const how = (l) => [...new Set(l.sources.map((s) => methodText(s.match_method)).filter(Boolean))].join(" · ");
 // Below this name-match score the "match" is just the nearest spelling, often to a name the
@@ -300,6 +307,9 @@ const titleCrop = (l) => l.sources.find((s) => s.title_url && s.title_exact)?.ti
     <div v-if="['queued', 'processing'].includes(scan.status)" class="panel">
       <h2>{{ headline }}</h2>
       <div class="progress"><div :style="{ width: Math.max(4, progress * 100) + '%' }"></div></div>
+      <p v-if="live?.remaining != null" class="eta num" aria-live="polite">
+        About <strong>{{ roughly(live.remaining) }}</strong> left · {{ secs(live.elapsed) }} so far<span v-if="live.estimate"> · estimated {{ roughly(live.estimate) }} in all</span>
+      </p>
       <div v-if="live?.stage" class="stage-now" aria-live="polite">
         <div class="row" style="justify-content:space-between">
           <strong>{{ live.stage.name }}<span v-if="live.stage.total"> · <span class="num">{{ live.stage.done }} of {{ live.stage.total }}</span></span></strong>
@@ -313,7 +323,7 @@ const titleCrop = (l) => l.sources.find((s) => s.title_url && s.title_exact)?.ti
           <span class="num">{{ secs(f.seconds) }}</span>
         </li>
       </ol>
-      <p class="sub">This usually takes about 5 minutes for a 100-card deck. You can leave this page; the scan keeps running.</p>
+      <p class="sub">The estimate comes from how long your recent scans took. You can leave this page; the scan keeps running.</p>
     </div>
 
     <div v-if="scan.status === 'failed'" class="alert">
@@ -683,6 +693,7 @@ const titleCrop = (l) => l.sources.find((s) => s.title_url && s.title_exact)?.ti
 .title-crop img { height: 26px; width: auto; max-width: 100%; object-fit: cover; object-position: left center; display: block; }
 .stage-now { display: flex; flex-direction: column; gap: 6px; }
 .progress.thin { height: 6px; }
+.eta { margin: 0; }
 .stages { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 2px; }
 .stages li { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px dashed var(--line); padding: 2px 0; }
 .test textarea { width: 100%; font-family: var(--mono); font-size: 0.85rem; }

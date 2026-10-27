@@ -149,7 +149,7 @@ def cut(img: np.ndarray, quad, height: int = 72) -> np.ndarray:
 
 STRIP_W = 600  # a strip is straightened with its card this many pixels wide to look for the bar
 STRIP_SIDE = 0.45  # ...reaching this far (of a card width) past either side, since its place across is rough
-MAX_TILT = 8.0  # degrees: a card behind may lie turned this much from the one in front
+MAX_TILT = 12.0  # degrees: a card behind may lie turned this much from the one in front
 TOP_PART = 0.17  # of a whole card's height: where to look for its title bar
 BAR_STRIP_H = (0.04, 0.08)  # a title bar's height, in card heights
 BAR_STRIP_W = (0.75, 0.97)  # its width, in card widths
@@ -304,3 +304,49 @@ def bars_down(img: np.ndarray, region: list[int], card_w: float, card_h: float) 
         if all(abs(f[0] - k[0]) > SAME_BAR * card_h for k in kept):
             kept.append(f)
     return [(q, s) for _, q, s in sorted(kept, key=lambda f: f[0])]
+
+
+TEXT_MIN = 15.0  # stroke strength across the middle of a title crop below which there is no name in it
+TEXT_ROWS = (0.3, 0.75)  # where a name's letters sit in its bar, top to bottom
+
+
+def _strokes(img: np.ndarray, quad, height: int = 72, reach: float = 0.0) -> tuple[np.ndarray, int]:
+    """How strongly each row of a title crop (cut `reach` bar heights taller each way) holds
+    letter strokes (upright edges, across the left 70% where a name is), and the crop's pad."""
+    tall = expand(quad, 0.0, 0.0, reach)
+    pad = int(round(height * reach))
+    crop = cut(img, tall, height + 2 * pad)
+    g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    W = g.shape[1]
+    gx = np.abs(cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3))[:, int(W * 0.03):int(W * 0.7)]
+    return np.convolve(gx.mean(axis=1), np.ones(5) / 5, "same"), pad
+
+
+def holds_text(img: np.ndarray, quad) -> bool:
+    """Whether a title crop has a line of letters across its middle: a name. A box landed on
+    art, a sleeve or the table has none (scan 16: the model was shown those and named a card
+    anyway: "Mox Emerald" for a green sleeve)."""
+    rows, _ = _strokes(img, quad)
+    n = len(rows)
+    return float(rows[int(n * TEXT_ROWS[0]):int(n * TEXT_ROWS[1])].mean()) >= TEXT_MIN
+
+
+def centre_on_text(img: np.ndarray, quad) -> list[list[float]]:
+    """The title box moved up or down so the line of letters sits in its middle: a bar's borders
+    can be found a little high or low (scan 16: "Chrome Mox" at the crop's bottom edge)."""
+    height = 72
+    rows, pad = _strokes(img, quad, height, 0.6)
+    inner = rows[pad:pad + height]
+    if rows.max() <= 0:
+        return quad
+    # The text line: the strongest band of rows a bar's text height tall.
+    band = int(height * (TEXT_ROWS[1] - TEXT_ROWS[0]))
+    sums = np.convolve(rows, np.ones(band), "valid")
+    at = int(np.argmax(sums)) + band / 2  # centre of the strongest band, in the tall crop
+    want = pad + height * (TEXT_ROWS[0] + TEXT_ROWS[1]) / 2
+    shift = (at - want) / height  # in bar heights
+    if abs(shift) < 0.08 or abs(shift) > 0.6 or sums.max() <= inner.sum() * 0.0:
+        return quad
+    tl, tr, br, bl = (np.float32(p) for p in quad)
+    d = (bl - tl) * shift
+    return [(tl + d).tolist(), (tr + d).tolist(), (br + d).tolist(), (bl + d).tolist()]

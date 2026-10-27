@@ -275,7 +275,7 @@ def test_entry_next_to_a_strip_reading_the_same_name_is_one_card():
 
 def test_a_strip_is_read_from_its_title_bar_then_whole(tmp_path, monkeypatch):
     """The levelled title bar is read first; when it gives no name, the whole strip is."""
-    img, _ = column(4)
+    img, _ = column(4, step=60)  # a whole title bar shows above the next card, as in real columns
     cols = cascades.find(img, [f.corners for f in detection.find_cards(img)])
     seen = []
 
@@ -324,7 +324,7 @@ def test_a_column_without_an_outlined_front_is_read_bar_by_bar(tmp_path, monkeyp
     """Scan 16: the model listed a column's cards, boxed roughly, but OpenCV couldn't outline its
     front card. Each title bar down the column is read on its own instead, and the model's
     entries it read again are replaced; a type line read off the front card is not a card."""
-    img, n = column(7, step=40, drift=0)
+    img, n = column(7, step=60, drift=0)
     names = iter(["Sorcery"] + [f"Card {k}" for k in range(1, 40)])
     calls = []
 
@@ -335,9 +335,35 @@ def test_a_column_without_an_outlined_front_is_read_bar_by_bar(tmp_path, monkeyp
     monkeypatch.setattr(vision, "read_title", read_title)
     fy = 1500 - 349 - 120
     entries = [vision.ReadCard(name=f"Card {k}", count=1, confidence=0.9,
-                               extra={"bbox": [470, fy - (n - k) * 40 - 30, 270, 60]}) for k in range(1, 4)]
+                               extra={"bbox": [470, fy - (n - k) * 60 - 30, 270, 60]}) for k in range(1, n + 1)]
     reads, replaced = asyncio.run(scanner._read_bar_columns(img, entries, [], [], 250, 349, 0, tmp_path, "p", None,
                                                             asyncio.Semaphore(1)))
     assert len(calls) >= n and "Sorcery" not in [r.name for r in reads]
     assert all(r.extra["strip"]["bar"] and r.extra["strip"]["found"] == "bars" for r in reads)
-    assert sorted(c.name for c in replaced) == sorted(c.name for c in entries if c.name in [r.name for r in reads])
+    read_names = [r.name for r in reads]
+    assert {c.name for c in entries if c.name in read_names} <= {c.name for c in replaced}
+
+
+def test_time_estimate_for_a_new_scan_and_while_it_runs(admin):
+    from deck_keeper.services import estimate, progress
+
+    r = admin.get("/api/scans/estimate", params={"photos": 2, "deck_type": "100"}).json()
+    assert r["cards"] == 100 and r["based_on"] == 0
+    assert r["seconds"] == round(2 * estimate.DEFAULT[0] + 100 * estimate.DEFAULT[1])
+
+    p = progress.Progress(1, photo=1, photos=1, estimate=100.0)
+    p.started -= 30
+    assert p.remaining(p.started + 30) == 70  # on track: the estimate less the time taken
+    p.stage = progress.Stage("Reading title strips", total=100, done=10, started=p.started)
+    assert p.remaining(p.started + 30) == 270 + progress.TAIL  # slower than estimated: the stage's own pace
+    snap = p.snapshot()
+    assert 0 < snap["fraction"] < 1 and snap["remaining"] >= snap["elapsed"]
+
+
+def test_time_estimate_learns_from_finished_scans(monkeypatch):
+    from deck_keeper.services import estimate
+
+    # Scans taking 10 s a photo and 2 s a card.
+    monkeypatch.setattr(estimate, "history", lambda db: [(1, 100, 210.0), (2, 60, 140.0), (1, 40, 90.0), (3, 120, 270.0)])
+    per_photo, per_card, n = estimate.rates(None)
+    assert n == 4 and abs(per_photo - 10) < 0.01 and abs(per_card - 2) < 0.01

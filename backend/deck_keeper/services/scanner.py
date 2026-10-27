@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from .. import app_settings, build_id
 from ..db import session_scope
 from ..models import Card, Detection, ScanImage, ScanJob, ScanLine
-from . import cascades, decklists, detection, evidence, matching, piles, plane, progress, resolver, scryfall, tiles, titles, vision
+from . import cascades, decklists, detection, estimate, evidence, matching, piles, plane, progress, resolver, scryfall, tiles, titles, vision
 
 log = logging.getLogger(__name__)
 
@@ -289,7 +289,7 @@ async def _read_strips(img: np.ndarray, columns: list[cascades.Column], crop_dir
         # The title bar found in the strip, levelled and cut out with a little room, holds the
         # whole name and nothing else; the whole strip is the fallback (scan 19: a strip a little
         # to one side read "Ring" for Sol Ring).
-        bar = await asyncio.to_thread(titles.in_strip, img, strip.corners)
+        bar = await asyncio.to_thread(_text_bar, img, titles.in_strip(img, strip.corners))
         path = crop_dir / f"{stem}-col{c:02d}-{k:02d}.jpg"
         read = None
         cuts = ([titles.cut(img, titles.expand(bar[0]), BAR_READ_H)] if bar else []) + [cascades.cut(img, strip)]
@@ -370,6 +370,7 @@ async def _read_bar_columns(img: np.ndarray, cards: list[vision.ReadCard], outli
         # The model's boxes sit over a stack and can end above its front card: reach below them.
         region = [int(cx - 0.6 * card_w), int(y0 - 0.15 * card_h), int(1.2 * card_w), int(y1 - y0 + 0.55 * card_h)]
         bars = await asyncio.to_thread(titles.bars_down, img, region, card_w, card_h)
+        bars = [b for b in (_text_bar(img, b) for b in bars) if b]
         for k, (quad, _) in enumerate(bars):
             centre = np.float32(quad).mean(0)
             if _inside_any([int(centre[0]), int(centre[1]), 0, 0], taken):
@@ -418,6 +419,16 @@ async def _read_bar_columns(img: np.ndarray, cards: list[vision.ReadCard], outli
     return kept, replaced
 
 
+def _text_bar(img: np.ndarray, bar: tuple[list[list[float]], float] | None) -> tuple[list[list[float]], float] | None:
+    """A title bar found by its borders, moved so its line of letters is in the middle; None when
+    it holds no letters (a line in the art, a sleeve's edge: not a title, and the model would make
+    up a name for it)."""
+    if not bar:
+        return None
+    quad = titles.centre_on_text(img, bar[0])
+    return (quad, bar[1]) if titles.holds_text(img, quad) else None
+
+
 def _title_boxes(img: np.ndarray, cards: list[vision.ReadCard], card_h: float | None, crop_dir: Path,
                  stem: str, card_w: float | None = None) -> None:
     """Give every card a box around its name (extra["title_quad"]) and a straightened cut-out of
@@ -430,7 +441,7 @@ def _title_boxes(img: np.ndarray, cards: list[vision.ReadCard], card_h: float | 
             quad, exact = (bar, True) if bar else (c.extra["strip"].get("title"), False)
         elif c.extra.get("corners"):
             quad, _ = titles.for_outlined(img, c.extra["corners"])
-            exact = True
+            quad, exact = titles.centre_on_text(img, quad), True
         elif c.extra.get("bbox"):
             # The model's box: look for a real title bar where its top is, else guess the band.
             x, y, bw, bh = c.extra["bbox"]
@@ -438,7 +449,7 @@ def _title_boxes(img: np.ndarray, cards: list[vision.ReadCard], card_h: float | 
             ch = card_h or cw * 88 / 63
             window = [[x + bw / 2 - cw / 2, y - 0.05 * ch], [x + bw / 2 + cw / 2, y - 0.05 * ch],
                       [x + bw / 2 + cw / 2, y + 0.17 * ch], [x + bw / 2 - cw / 2, y + 0.17 * ch]]
-            found = titles.in_strip(img, window)
+            found = _text_bar(img, titles.in_strip(img, window))
             quad, exact = (found[0], True) if found else (titles.band_of_box(c.extra["bbox"], card_h), False)
         else:
             continue
@@ -721,7 +732,8 @@ async def process_job(job_id: int) -> None:
                         "Check the container's internet access, then use Settings → Card database."
                     ) from e
                 index = matching.get_index(db)
-            progress.start(job.id, len(job.images))
+            guess = estimate.seconds_for(db, len(job.images), job.deck_type or "other")["seconds"]
+            progress.start(job.id, len(job.images), guess)
             size = DECK_TYPES.get(job.deck_type or "other", {})
             total = sum(size.get(k) or 0 for k in ("main", "side", "commander"))
             expect = round(total / len(job.images)) if total and job.images else None
