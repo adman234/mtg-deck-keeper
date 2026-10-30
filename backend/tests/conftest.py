@@ -52,3 +52,9 @@ def admin(client):
 
 def chat_reply(cards: list[dict]) -> httpx.Response:
     return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"cards": cards})}}]})
+
+
+@pytest.fixture
+def pile_counts(monkeypatch):
+    """Pile counting on (PILE_COUNTS=true): it is off by default."""
+    monkeypatch.setenv("PILE_COUNTS", "true")

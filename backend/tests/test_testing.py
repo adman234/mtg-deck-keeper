@@ -58,7 +58,7 @@ def test_score_counts_either_face_of_a_two_faced_card():
     assert s["right"] == 1 and s["extra"] == []
 
 
-def test_scan_scored_against_the_real_list_on_every_read(admin):
+def test_scan_scored_against_the_real_list_on_every_read(admin, pile_counts):
     admin.put("/api/admin/settings", json={"values": {"vision.model": "daily"}})
     vision.transport = httpx.MockTransport(lambda r: chat_reply([
         {"name": "Lightning Bolt", "count": 3, "confidence": 0.95}, {"name": "Shock", "count": 1, "confidence": 0.9}]))

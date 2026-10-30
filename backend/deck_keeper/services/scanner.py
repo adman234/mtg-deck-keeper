@@ -100,7 +100,8 @@ class _ImageResult:
 async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionConfig,
                          sem: asyncio.Semaphore, max_side: int, layout: str = "piles",
                          zoom: bool = True, index: matching.CardIndex | None = None,
-                         tiles_with_columns: bool = False, expect: int | None = None) -> _ImageResult:
+                         tiles_with_columns: bool = False, expect: int | None = None,
+                         pile_counts: bool = False) -> _ImageResult:
     img = await asyncio.to_thread(cv2.imread, img_row.path)
     if img is None:
         raise vision.VisionError(f"Could not open {img_row.filename}")
@@ -188,6 +189,10 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
                 debug["tiled"], debug["tiles"] = why, tile_debug
                 if tiled:
                     cards, box_scale = tiled, box_scale or "tiles"
+    if not pile_counts:
+        # Pile counting is off: whatever count the model gave, each card it found counts once.
+        for c in cards:
+            c.count = 1
     cards, duplicates = piles.drop_duplicates(cards)
     debug["duplicates"] = [{"name": d.name, "count": d.count, "box": d.extra.get("bbox")} for d in duplicates]
 
@@ -237,8 +242,13 @@ async def _process_image(img_row: ScanImage, prepass: bool, cfg: vision.VisionCo
                                       extra={"bbox": list(f.bbox), "corners": f.corners, "snapped": True, "unlisted": True})
                       for f in unlisted]
             debug["snap"]["unlisted"] = len(unlisted)
-            await asyncio.to_thread(piles.count_fans, img, cards)
+            if pile_counts:
+                await asyncio.to_thread(piles.count_fans, img, cards)
             await piles.zoom_in(img, cards, crop_dir, stem, cfg, sem)
+            if not pile_counts:
+                for c in cards:  # nor what the close-up counted
+                    if c.extra.get("zoom"):
+                        c.extra["zoom"].count = None
             if index is not None:
                 await piles.settle(img, cards, index, cfg, sem)
         photo_cards = len(cards)
@@ -743,7 +753,7 @@ async def process_job(job_id: int) -> None:
                 db.commit()
                 result = await _process_image(img, job.prepass, cfg, sem, vs["image_max_side"], job.layout,
                                               vs["pile_zoom"], matching.get_index(db),
-                                              vs["tiles_with_columns"], expect)
+                                              vs["tiles_with_columns"], expect, vs["pile_counts"])
                 img.crops_found, img.photo_cards, img.photo_error = result.crops, result.photo_cards, result.photo_error
                 img.debug = result.debug
                 reads = result.reads

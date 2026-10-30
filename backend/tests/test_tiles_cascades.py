@@ -202,7 +202,7 @@ def test_commander_decks_allow_one_copy():
     assert scanner.copy_limit("Sol Ring", "60+15") == 4 and scanner.copy_limit("Seven Dwarves", "99") == 7
 
 
-def test_deck_type_is_kept_and_can_be_changed(admin):
+def test_deck_type_is_kept_and_can_be_changed(admin, pile_counts):
     from .test_scan_flow import _jpeg
     vision.transport = httpx.MockTransport(lambda r: chat_reply([{"name": "Lightning Bolt", "count": 2, "confidence": 0.9}]))
     scryfall.transport = httpx.MockTransport(lambda r: httpx.Response(404, json={}))
@@ -367,3 +367,27 @@ def test_time_estimate_learns_from_finished_scans(monkeypatch):
     monkeypatch.setattr(estimate, "history", lambda db: [(1, 100, 210.0), (2, 60, 140.0), (1, 40, 90.0), (3, 120, 270.0)])
     per_photo, per_card, n = estimate.rates(None)
     assert n == 4 and abs(per_photo - 10) < 0.01 and abs(per_card - 2) < 0.01
+
+
+def test_pile_counts_are_off_unless_turned_on(admin, monkeypatch):
+    """By default every card found counts once, whatever count the model gives a pile; PILE_COUNTS
+    turns pile counting back on."""
+    from .test_scan_flow import _fake_model, _jpeg
+
+    admin.put("/api/admin/settings", json={"values": {"vision.model": "daily"}})
+    vision.transport = httpx.MockTransport(_fake_model)  # Lightning Bolf x4, Swiftspear x2, Mountain x20
+    scryfall.transport = httpx.MockTransport(lambda r: httpx.Response(404, json={}))
+
+    def quantities():
+        job_id = admin.post("/api/scans", data={"prepass": "false"},
+                            files=[("files", ("a.jpg", _jpeg(), "image/jpeg"))]).json()["id"]
+        asyncio.run(scanner.process_job(job_id))
+        lines = admin.get(f"/api/scans/{job_id}").json()["lines"]
+        return {(ln["card"] or {}).get("name") or ln["raw_name"]: ln["qty"] for ln in lines}
+
+    off = quantities()
+    assert off["Lightning Bolt"] == 1 and off["Monastery Swiftspear"] == 1 and off["Mountain"] == 1
+
+    monkeypatch.setenv("PILE_COUNTS", "true")
+    on = quantities()
+    assert on["Lightning Bolt"] == 4 and on["Monastery Swiftspear"] == 2

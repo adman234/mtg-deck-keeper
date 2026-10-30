@@ -63,6 +63,8 @@ Settings come from three places, highest priority first:
 | `MATCH_FOREIGN_NAMES` | `true` | Search Scryfall for foreign-language and alternate names |
 | `MATCH_REASK` | `true` | Re-ask the model with candidates for unclear cut-out cards |
 | `PILE_ZOOM` | `true` | Re-read each pile from a close-up (count and name) |
+| `PILE_COUNTS` | `false` | Count several copies stacked or fanned in one pile; off, each card found counts once |
+| `TILES_WITH_COLUMNS` | `false` | Also read cascade photos in tiles (finds cards outside the columns, about twice as slow) |
 | `VISION_IMAGE_MAX_SIDE` | `1600` | Whole photos are shrunk to this before sending |
 | `CARD_DETECTION_DEFAULT` | `true` | Pre-pass checkbox default |
 | `ALLOW_PASSWORD_LOGIN` | `true` | Username/password login |

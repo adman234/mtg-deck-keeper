@@ -2,12 +2,15 @@ import asyncio
 import json
 
 import httpx
+import pytest
 
 from deck_keeper.services import matching, piles, scanner, scryfall, vision
 from deck_keeper.services.vision import ReadCard
 
 from .conftest import chat_reply
 from .test_scan_flow import _table_jpeg
+
+pytestmark = pytest.mark.usefixtures("pile_counts")  # these read piles of the same card
 
 
 def _card(name, count=4, box=None, conf=0.9):

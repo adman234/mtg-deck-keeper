@@ -3,11 +3,14 @@ import io
 import json
 
 import httpx
+import pytest
 from PIL import Image
 
 from deck_keeper.services import scanner, scryfall, vision
 
 from .conftest import chat_reply
+
+pytestmark = pytest.mark.usefixtures("pile_counts")  # these read piles of the same card
 
 
 def _jpeg() -> bytes:

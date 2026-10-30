@@ -69,6 +69,10 @@ SPECS: list[Spec] = [
     Spec("vision.tiles_with_columns", "TILES_WITH_COLUMNS", bool, False, "Also read cascades in tiles", "vision",
          "When a photo is mostly cascading columns, every title in them is read on its own. Also reading "
          "the photo in tiles can find a card lying outside the columns, but takes about twice as long."),
+    Spec("vision.pile_counts", "PILE_COUNTS", bool, False, "Count piles of the same card", "vision",
+         "Count several copies of a card stacked or fanned in one pile (the model's count, and OpenCV "
+         "counting the fanned edges). Off: every card found counts once, so lay out each copy where its "
+         "name shows (as in a cascade)."),
     Spec("vision.image_max_side", "VISION_IMAGE_MAX_SIDE", int, 1600, "Max image size sent (px)", "vision"),
     # Login / OIDC (names match Mealie)
     Spec("auth.password_login", "ALLOW_PASSWORD_LOGIN", bool, True, "Allow username/password login", "auth",
